@@ -70,9 +70,6 @@ Il fallback di `streaming_core` punta a `focus`, cioè a una sorgente morta: chi
 
 ## Difetti noti, non corretti
 
-- `MP4Generator::get_buffer` è dichiarata `size_t` ma ritorna `-1`/`-2` come sentinelle, e il
-  chiamante testa `> 0`: un `size_t` non è mai negativo, quindi le sentinelle diventano conteggi di
-  byte enormi e `MHD_CONTENT_READER_END_OF_STREAM` non viene mai restituito.
 - `main()` stampa `Server started on port 8080.` **prima** di chiamare `start()`: se la porta è
   occupata il log mostra comunque un avvio riuscito.
 - `WebServer::start()` blocca su `getc(stdin)`: con stdin a EOF il server si spegne subito. Per

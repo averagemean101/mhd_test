@@ -107,7 +107,12 @@ public:
 
     virtual ~MP4Generator() noexcept override { } // created just for noexcept
     
-    size_t get_buffer(char* buf, size_t max)
+    // Returns a byte count, or one of MHD's two sentinels. The signature has to be signed to be
+    // able to say that. Returning them from a size_t function does happen to work, because the
+    // macros are SIZE_MAX and SIZE_MAX-1, the same bit patterns the ssize_t conversion turns back
+    // into -1 and -2 -- but nothing in the code says so, it is a C4245 the project only misses by
+    // building at /W3, and the caller's "> 0" test reads like a guard while never firing for them.
+    ssize_t get_buffer(char* buf, size_t max)
     {
         while (media_in == nullptr) {
             cout << "Should never happen!\n";
@@ -119,7 +124,7 @@ public:
         }
 
         if (media_in == nullptr || media_in->cancel_read) {
-            return -2;
+            return static_cast<ssize_t>(MHD_CONTENT_READER_END_WITH_ERROR);
         }
 
         auto opt = stream_queue.pop();
@@ -130,11 +135,11 @@ public:
             memcpy(buf, vec->data(), size); // ottimizzare con un move?
             delete vec, vec = nullptr;
 
-            return size;
+            return static_cast<ssize_t>(size);
         }
 
-        cout << "+++++++++++++++++++++++++++++++++ return -1\n";
-        return -1;
+        cout << "+++++++++++++++++++++++++++++++++ return END_OF_STREAM\n";
+        return static_cast<ssize_t>(MHD_CONTENT_READER_END_OF_STREAM);
     }
 
     int write_cb(const uint8_t* buf, int size)
@@ -314,9 +319,15 @@ public:
     static ssize_t data_generator(void* cls, uint64_t pos, char* buf, size_t max)
     {
         MP4Generator* mp4 = reinterpret_cast<MP4Generator*>(cls);
-        auto written_bytes = mp4->get_buffer(buf, max);
-        auto ret = (written_bytes > 0 ? written_bytes : MHD_CONTENT_READER_END_OF_STREAM);
-        return ret;
+        const ssize_t written_bytes = mp4->get_buffer(buf, max);
+
+        // get_buffer already returns MHD's sentinels, so they pass straight through: collapsing
+        // them onto END_OF_STREAM would throw away the distinction with END_WITH_ERROR. Only a
+        // zero-length read is remapped, as before: MHD reads 0 as "no data yet" and would call
+        // back immediately, spinning.
+        return (written_bytes == 0)
+            ? static_cast<ssize_t>(MHD_CONTENT_READER_END_OF_STREAM)
+            : written_bytes;
     }
 
     static void data_generator_free(void* cls)
