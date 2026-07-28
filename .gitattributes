@@ -1,0 +1,16 @@
+# Politica di fine riga del repository, indipendente dalla configurazione della
+# singola macchina: su Windows l'installer di Git imposta core.autocrlf=true
+# nella config di sistema, e senza queste regole il comportamento dipenderebbe
+# da come e' installato git su chi clona.
+
+# I file di testo del progetto: LF nel repository, fine riga native nel working
+# tree. Nessun effetto sui blob gia' committati, che sono gia' tutti LF.
+* text=auto
+
+# Dentro third_party/ non si converte NULLA. Sono artefatti vendor: i quattro
+# microhttpd.h hanno LF nell'archivio ufficiale, e senza questa riga un clone su
+# Windows li scriverebbe CRLF, rendendoli diversi byte per byte dall'upstream.
+# Pinnare i binari serve proprio a garantire quella corrispondenza.
+# Si usa -text e non "binary" per non perdere il diff leggibile degli header
+# quando la dipendenza verra' aggiornata di versione.
+/third_party/** -text
