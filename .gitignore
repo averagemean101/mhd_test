@@ -9,6 +9,13 @@ ipch/
 *.VC.opendb
 *.sarif
 
+# Sottoprodotti del linker che non servono a chi consuma una libreria: .ilk e'
+# lo stato del link incrementale, valido solo sulla macchina che l'ha prodotto;
+# .exp serve solo quando exe e DLL hanno dipendenze di export circolari, che qui
+# non esistono. Restano su disco dentro third_party/, ma fuori dal repository.
+*.ilk
+*.exp
+
 # Della distribuzione libmicrohttpd in third_party/ si versiona solo la variante
 # contro cui questo progetto linka: win64, layout VS2019 (consumato dal toolset
 # v143 di VS2022). Le varianti x86, MinGW e VS2017 restano sul disco ma fuori
