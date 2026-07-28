@@ -1,0 +1,41 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Test strumienia</title>
+</head>
+<body>
+    <video width="1280" height="720" controls>
+    </video>
+</body>
+<script>
+    var vidElement = document.querySelector('video');
+
+    if (window.MediaSource) {
+        var mediaSource = new MediaSource();
+        vidElement.src = URL.createObjectURL(mediaSource);
+        mediaSource.addEventListener('sourceopen', sourceOpen);
+    } else {
+        console.log("The Media Source Extensions API is not supported.")
+    }
+
+    function sourceOpen(e) {
+        URL.revokeObjectURL(vidElement.src);
+        var mime = 'video/mp4; codecs="avc1.640028"';
+        var mediaSource = e.target;
+        var sourceBuffer = mediaSource.addSourceBuffer(mime);
+        var videoUrl = 'http://127.0.0.1:8080/live/rai1';
+        fetch(videoUrl)
+        .then(function(response) {
+            return response.arrayBuffer();
+        })
+        .then(function(arrayBuffer) {
+            sourceBuffer.addEventListener('updateend', function(e) {
+                if (!sourceBuffer.updating && mediaSource.readyState === 'open') {
+                    mediaSource.endOfStream();
+                }
+            });
+            sourceBuffer.appendBuffer(arrayBuffer);
+        });
+    }
+</script>
+</html>

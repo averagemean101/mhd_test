@@ -1,0 +1,19 @@
+# Build output e stato dell'IDE
+.vs/
+x64/
+Win32/
+ipch/
+*.user
+*.aps
+*.VC.db
+*.VC.opendb
+*.sarif
+
+# Della distribuzione libmicrohttpd in third_party/ si versiona solo la variante
+# contro cui questo progetto linka: win64, layout VS2019 (consumato dal toolset
+# v143 di VS2022). Le varianti x86, MinGW e VS2017 restano sul disco ma fuori
+# dal repository: il perimetro supportato e' solo win64.
+/third_party/libmicrohttpd-0.9.73-w32-bin/*
+!/third_party/libmicrohttpd-0.9.73-w32-bin/x86_64/
+/third_party/libmicrohttpd-0.9.73-w32-bin/x86_64/*
+!/third_party/libmicrohttpd-0.9.73-w32-bin/x86_64/VS2019/

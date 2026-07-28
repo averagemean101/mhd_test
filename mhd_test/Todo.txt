@@ -1,0 +1,50 @@
+TODO list
+
+ + Togliere IndexPage, fare tutto con FilesPage e un vero index.html.
+ + Lasciare a LivePage il folder speciale /live/. LivePage andrà inserito al primo posto in controllers.
+ + Formato log request: GET: '/focus/' -> 200, GET: '/none.txt' -> 404
+ + "constexpr auto HTML_HEAD" potrebbe diventare una funzione che prende come parametro il titolo.
+   creare anche get_html_page(body, title).
+ + Implementare in utils.h, str_starts/ends_with e str_contains. Anche la versione by_val.
+ + Creare un classe base BaseGenerator per gli stream in mp4.
+ + Su DASHGenerator, dopo le mod ad avpp, aggiungere le opzioni mancanti per i codec.
+ + Gestire le eccezioni in streaming_thread. Magari tentare 3 tre volte prima di uscire dal thread.
+ + Capire perchè non riesce a scrivere/cancellare focus.mpd. Col muxer dash
+   non serve invocare avio_open(). Probabilmente lo fai lui internamente.
+ + Implement HLS.
+ + link a cartella superiore ".." in FilesPage.
+ + Non ritenta la chiamata a streaming_core() se l'applicazione sta terminando.
+ + Non si compila in release. Il .lib è compilato con una versione errata del VS. 
+   Per ora uso la dll che invece non da problemi.
+
+
+ - mhd: default keep-alive for connections. con ffplay ed ffprobe devo specificare 
+   ogni volta -multiple_requests 1 altrimenti non funziona.
+ - mhd: specificare il mime-type dei files che invio. Siccome è impossible avere un elenco 
+   completo ed affidabile di tutti i mime, potrei specificalo solo per alcuni formati dove
+   è necessario e per gli altri lascio com'è ora, cioè non specificato.
+ - mhd: rif. a sopra, anche il character encoding.
+
+
+
+ APPUNTI VARI
+
+//time_t time_cur;
+//time(&time_cur);
+//struct tm* time_now = localtime(&time_cur);
+//response << "<html><head><title>Welcome!</title></head><body>Hello World at "
+//    << time_now->tm_hour << ":" << time_now->tm_min << ":" << time_now->tm_sec << "!</body></html>";
+
+//    Funziona senza transcod. audio (d2.mp4)
+// 1. libav_test con frag_keyframe option, oppure
+//    ffmpeg -protocol_whitelist file,https,tcp,tls -i tv\focus.m3u8 -c:vec copy -c:a copy -wr_cb mp4 -movflags frag_keyframe -t 30 d1.mp4  
+// 2. ffmpeg -i d1.mp4 -c copy -movflags faststart+empty_moov d2.mp4
+//    Mute
+//ffmpeg -protocol_whitelist file,https,tcp,tls -i tv\focus.m3u8 -c:vec copy -c:a copy -wr_cb mp4 -movflags empty_moov                         -listen 1 -bsf:a aac_adtstoasc http://127.0.0.1:8080
+//ffmpeg -protocol_whitelist file,https,tcp,tls -i tv\focus.m3u8 -c:vec copy -c:a copy -wr_cb mp4 -movflags frag_keyframe+faststart+empty_moov -bsf:a aac_adtstoasc -listen 1 http://127.0.0.1:8080
+//    OK ma transc.
+//ffmpeg -protocol_whitelist file,https,tcp,tls,crypto -i tv\focus.m3u8 -c:vec copy -c:a aac -ac 2 -b:a 96k -f mp4 -movflags empty_moov -listen 1 http ://127.0.0.1:8080
+
+//return (strlen(path) > 6 &&
+//        path[1] == 'f' && path[5] == 's' && path[6] == '/' &&
+//        strcmp("GET", method) == 0);
