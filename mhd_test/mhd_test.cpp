@@ -398,9 +398,14 @@ public:
 
 int main(int argc, char** argv) 
 {
+    // Disabled: HLSGenerator is hardwired to the Rai relinker, which answers 403 from the Akamai
+    // edge. It retried three times at startup and held Run() for its full 10 s timeout, delaying
+    // the web server by that much to produce nothing. Recovering Rai needs a browser User-Agent,
+    // &output=64 and parsing the XML it returns in CDATA -- see the README. Live streaming is
+    // unaffected: it goes through LivePage, on demand, per request.
     //DASHGenerator generator;
-    HLSGenerator generator;
-    generator.Run();
+    //HLSGenerator generator;
+    //generator.Run();
 
     LivePage live;
     FilesPage files;
