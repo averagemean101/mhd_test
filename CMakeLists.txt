@@ -1,4 +1,6 @@
-cmake_minimum_required(VERSION 3.21)
+# 3.26 for "cmake -E copy_directory_if_different", used to stage www/ without rewriting files that
+# have not changed -- a plain copy_directory would retrigger dependents on every build.
+cmake_minimum_required(VERSION 3.26)
 
 project(mhd_test
     DESCRIPTION "Web TV server: live stream remuxed to fragmented MP4 over HTTP"
@@ -121,6 +123,7 @@ add_executable(mhd_test
     ${MHD_TEST_SOURCES}
     ${MHD_TEST_HEADERS}
     mhd_test/Todo.txt
+    www/index.html
 )
 
 # Mirrors the filters the .vcxproj.filters used to provide, so the generated
@@ -176,6 +179,16 @@ add_custom_command(TARGET mhd_test POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "$<TARGET_FILE:microhttpd>" "$<TARGET_FILE_DIR:mhd_test>"
     COMMENT "Staging libmicrohttpd next to the executable"
+    VERBATIM
+)
+
+# The file server resolves its root as <exe dir>/www, not against the working directory, so the
+# served pages have to sit next to the executable too. Editing www/ therefore needs a rebuild to
+# take effect -- cheap, and it keeps the executable relocatable.
+add_custom_command(TARGET mhd_test POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different
+            "${CMAKE_SOURCE_DIR}/www" "$<TARGET_FILE_DIR:mhd_test>/www"
+    COMMENT "Staging www/ next to the executable"
     VERBATIM
 )
 

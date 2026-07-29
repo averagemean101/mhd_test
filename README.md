@@ -72,20 +72,86 @@ ricompilato, altrimenti l'eseguibile non parte affatto.
 mhd_test.exe        # server sulla porta 8080, ENTER per chiudere
 ```
 
-- `GET /live/<canale>` → MP4 frammentato in streaming, `Content-Type: video/mp4`
-- `GET /<path>` → file server su `d:\downloads\www\`
+Poi <http://127.0.0.1:8080/>, che serve la pagina con il link per avviare lo stream.
 
-## Stato delle sorgenti (28/07/2026)
-
-| canale | esito |
+| rotta | risposta |
 |---|---|
-| **`tv8`** | **funziona**, verificato in Firefox. La `.php` conia un token nuovo a ogni chiamata, quindi va invocata quella e non la URL che restituisce |
-| `rai1` | **403** dall'edge Akamai. Recuperabile ma serve codice: User-Agent da browser, `&output=64` (senza il quale risponde 200 con un `<Mediapolis>` vuoto) e il parsing dell'XML, perché la URL arriva in CDATA |
-| `italia1`, `focus` | **morti**: playlist Mediaset salvate nel 2021, il cui CDN non risolve più in DNS |
+| `GET /` | `www/index.html`: lista canali a sinistra, televisore a destra |
+| `GET /live/{rai1,rai2,tv8}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
+| `GET /live/<altro>` | `404` |
+| `GET /<path>` | file server, oppure l'elenco della cartella se `<path>` è una directory senza `index.html` |
+| fuori dal root | `403` |
 
-Il fallback di `streaming_core` punta a `focus`, cioè a una sorgente morta: chi chiede
-`/live/<qualcosa>` senza scrivere `tv8` non ottiene nulla. E `main()` avvia comunque un
-`HLSGenerator` cablato su Rai, che fallisce tre volte e **ritarda di ~10 s** l'avvio del web server.
+I canali stanno nella tabella `CHANNELS` di [mhd_test.cpp](mhd_test/mhd_test.cpp): aggiungerne uno è una riga lì più un `<button>` in `www/index.html`. `LivePage` risolve lo slug e passa la URL già risolta al generator, che quindi non ripete la ricerca.
+
+Il root del file server è la cartella **`www/` accanto all'eseguibile**, non la working directory:
+il programma si lancia tipicamente come `.\build\Release\mhd_test.exe` dalla radice del repo, e un
+path relativo alla CWD cercherebbe nel posto sbagliato. `www/` è versionata qui e CMake la copia
+accanto all'exe a ogni build, quindi **dopo aver editato la pagina serve un rebuild**.
+
+## Stato delle sorgenti (29/07/2026)
+
+Tre canali, tutti verificati end-to-end attraverso l'applicazione (25 MB, 24 MB e 8 MB di stream
+consegnati in ~20 s ciascuno):
+
+| canale | sorgente | note |
+|---|---|---|
+| `tv8` | `mytivu.it/Application/Channels/TV8.php` | la `.php` conia un token Akamai nuovo a ogni chiamata: va invocata quella, **non** la URL che restituisce |
+| `rai1` | relinker Rai, `cont=2606803` | vedi sotto |
+| `rai2` | relinker Rai, `cont=308718` | vedi sotto |
+
+### Il relinker Rai non richiede parsing
+
+Una versione precedente di questo README dava Rai per irrecuperabile senza «User-Agent da browser,
+`&output=64` e il parsing dell'XML, perché la URL arriva in CDATA». **Il parsing non serve**: con
+
+```
+?cont=<id>&output=7&forceUserAgent=raiplayappletv
+```
+
+il relinker risponde con un **302 diretto** al playlist HLS, e FFmpeg segue i redirect. Con
+`output=64` invece restituisce un documento `<Mediapolis>` con la URL sepolta in CDATA — quella è
+la forma che richiederebbe di scriverne il parser. Senza nessun `output` risponde 200 con un
+`<Mediapolis>` vuoto, che è l'origine dell'equivoco.
+
+Resta necessario uno **User-Agent da browser**: senza, il relinker risponde `403 Access Denied`.
+Ed è l'unica opzione HTTP che `ffio_copy_url_options()` propaga ai contesti annidati, quindi
+impostarla una volta copre playlist e segmenti — a differenza di `tls_verify`, che ha bisogno
+dell'hook `io_open`.
+
+Verificato che gli stessi ID valgono anche per `rai3` (`cont=308709`): aggiungerlo è una riga.
+Attenzione invece agli ID indovinati: `cont=2606805` risponde con un `podcastcdn/.../2606805.mp4`,
+cioè **VOD**, non il canale live.
+
+### Sorgenti rimosse
+
+| ex canale | perché |
+|---|---|
+| `italia1`, `focus` | **morti**: playlist Mediaset salvate nel 2021, il cui CDN non risolve più in DNS |
+| `Cielo` (mytivu) | l'endpoint esiste ma risponde `302` senza `Location` utile |
+
+Con le prime due sono spariti `DASHGenerator` e `HLSGenerator`, che erano già disattivati,
+puntavano a quelle sorgenti e cablavano dei `filesystem::current_path("d:\...")` — cambiando la
+working directory **del processo**, quindi anche la risoluzione del file server.
+
+### DNS ballerino su macchina multi-homed
+
+Con VPN aziendale, Ethernet e Wi-Fi attive contemporaneamente ci sono **due default route e due set
+di resolver**, e l'host CDN `hlslive-web-gcdn-skycdn-it.akamaized.net` a volte non risolve:
+
+```
+[tcp @ ...] Failed to resolve hostname hlslive-web-gcdn-skycdn-it.akamaized.net: The name does not resolve
+av_error: code=-5, text="I/O error"
+```
+
+È intermittente — verificato fallire 3 volte di fila e poi risolvere 5 su 5 pochi minuti dopo — e
+non è un problema dell'applicazione: lo stream muore perché la sorgente diventa irraggiungibile a
+metà. Per questo `max_retries` è **6** con backoff crescente (~8 s di finestra): con i 3 tentativi a
+500 ms fissi di prima lo stream si arrendeva dopo ~1,5 s, troppo poco per scavalcare un buco del
+resolver.
+
+Il rovescio della medaglia è dichiarato: su una sorgente **davvero** morta il client aspetta ~19 s
+prima di ricevere l'errore, contro ~2 s di prima.
 
 ### HTTPS dietro un proxy con TLS inspection
 
@@ -134,3 +200,15 @@ ma resta un downgrade. Fuori dalla VPN aziendale l'opzione va tolta.
 - `WebServer::start()` blocca su `getc(stdin)`: con stdin a EOF il server si spegne subito. Per
   pilotarlo da script serve tenere stdin aperta e mandare `\n` per la chiusura pulita — che è anche
   l'unico modo per far flushare `std::cout` quando è rediretto su file.
+- **`LivePage::createResponse` blocca fino a 10 s prima di rispondere.** `Run()` attende che il
+  thread pubblichi `media_in` per 100 × 100 ms, e solo dopo MHD manda gli header: su una sorgente
+  lenta il browser resta sullo spinner senza sapere nulla. Da quando `Run()` esce subito se il
+  thread ha rinunciato, il caso *fallimento* è veloce — ma il caso *lento* resta bloccante, e la
+  risposta andrebbe restituita subito lasciando che sia la coda a far attendere il client.
+- **`get_buffer` dichiara un errore invece della fine dello stream.** Controlla
+  `media_in == nullptr || cancel_read` **prima** di svuotare la coda, quindi appena la sorgente
+  termina scarta i buffer residui e ritorna `MHD_CONTENT_READER_END_WITH_ERROR`. Il client riceve
+  una risposta abortita e un browser la segnala come "file danneggiato".
+- `media_in` punta a una `FormatContext` **locale** di `streaming_core`: fra il `return` di quella
+  funzione e `media_in = nullptr` in `streaming_thread` il puntatore è dangling, e `get_buffer` lo
+  dereferenzia per leggere `cancel_read`.

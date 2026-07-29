@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>mhd_test</title>
+    <style>
+        /* Everything is inline on purpose: the file server maps only .html to a content type, so a
+           separate stylesheet or image would be served without one. */
+
+        :root {
+            --wood-hi: #8a5c33;
+            --wood: #6d4526;
+            --wood-lo: #432915;
+            --brass: #c2963f;
+            --brass-dim: #7d6029;
+            --phosphor: #9fd8b0;
+            --room: #211d19;
+        }
+
+        * { box-sizing: border-box; }
+
+        html, body { height: 100%; }
+
+        body {
+            background:
+                radial-gradient(120% 80% at 50% 0%, #2f2a25 0%, transparent 60%),
+                var(--room);
+            display: flex;
+            margin: 0;
+            font-family: 'Futura', 'Century Gothic', 'Avenir Next', system-ui, sans-serif;
+        }
+
+        .room {
+            align-items: center;
+            display: flex;
+            gap: clamp(1.5rem, 5vw, 5rem);
+            justify-content: center;
+            margin: auto;
+            padding: 2rem;
+        }
+
+        /* ---- channel list ------------------------------------------------ */
+
+        .channels {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .channel {
+            background: none;
+            border: 0;
+            border-left: 3px solid transparent;
+            color: #8b8177;
+            cursor: pointer;
+            font: inherit;
+            font-size: clamp(1.5rem, 3.5vw, 2.5rem);
+            letter-spacing: 0.14em;
+            padding: 0.2em 0 0.2em 0.6em;
+            text-align: left;
+            transition: color 160ms ease, border-color 160ms ease;
+        }
+
+        .channel:hover,
+        .channel:focus-visible {
+            color: var(--brass);
+            outline: none;
+        }
+
+        .channel[aria-current='true'] {
+            border-left-color: var(--brass);
+            color: var(--phosphor);
+            text-shadow: 0 0 12px rgba(159, 216, 176, 0.45);
+        }
+
+        /* ---- the set ----------------------------------------------------- */
+
+        .tv { width: min(78vw, 60rem); }
+
+        .cabinet {
+            background:
+                repeating-linear-gradient(92deg, rgba(0, 0, 0, 0.14) 0 2px, transparent 2px 7px),
+                linear-gradient(160deg, var(--wood-hi), var(--wood) 45%, var(--wood-lo));
+            border-radius: 1.6rem 1.6rem 0.8rem 0.8rem;
+            box-shadow:
+                inset 0 2px 0 rgba(255, 226, 186, 0.22),
+                inset 0 -3px 8px rgba(0, 0, 0, 0.45),
+                0 28px 45px -18px rgba(0, 0, 0, 0.75);
+            display: flex;
+            gap: 1.4rem;
+            padding: 1.4rem;
+        }
+
+        .screen-well {
+            background: #1b120a;
+            border-radius: 1.1rem;
+            box-shadow:
+                inset 0 0 0 3px rgba(0, 0, 0, 0.55),
+                inset 0 0 22px rgba(0, 0, 0, 0.9);
+            flex: 1;
+            padding: 0.9rem;
+        }
+
+        .screen {
+            aspect-ratio: 16 / 9;
+            background: #0c110d;
+            box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.95);
+            overflow: hidden;
+            position: relative;
+            width: 100%;
+        }
+
+        .screen video,
+        .screen .static {
+            height: 100%;
+            left: 0;
+            position: absolute;
+            top: 0;
+            width: 100%;
+        }
+
+        /* contain, not cover: the whole picture stays visible, and any mismatch against the tube
+           becomes black bars from the element's own background. Both variants of the source are
+           16:9, so against a 16:9 tube there are no visible bars -- this stays as the guarantee that
+           nothing gets cropped if the source ever changes shape. No filters, no overlay: the image
+           is left exactly as it is decoded. */
+        .screen video {
+            background: #000;
+            object-fit: contain;
+        }
+
+        /* Snow only, and only when there really is no picture. No brightness animation: it applied a
+           filter to the whole screen, which read as a light effect over a perfectly good image. */
+        .static { display: none; }
+        .screen[data-state='nosignal'] .static { display: block; }
+
+        /* ---- control panel ----------------------------------------------- */
+
+        .panel {
+            align-items: center;
+            display: flex;
+            flex-direction: column;
+            gap: 1.1rem;
+            justify-content: flex-start;
+            padding-top: 0.4rem;
+            width: clamp(3.2rem, 7vw, 4.6rem);
+        }
+
+        .grille {
+            background: repeating-linear-gradient(180deg,
+                    rgba(0, 0, 0, 0.55) 0 2px, rgba(255, 220, 180, 0.07) 2px 5px);
+            border: 2px solid rgba(0, 0, 0, 0.35);
+            border-radius: 0.4rem;
+            flex: 1;
+            width: 100%;
+        }
+
+        .knob {
+            background:
+                radial-gradient(40% 40% at 35% 30%, rgba(255, 255, 255, 0.35), transparent 60%),
+                linear-gradient(150deg, #3b302a, #1a1512);
+            border: 2px solid var(--brass-dim);
+            border-radius: 50%;
+            box-shadow: 0 3px 6px rgba(0, 0, 0, 0.6);
+            height: 2.1rem;
+            padding: 0;
+            position: relative;
+            width: 2.1rem;
+        }
+
+        .knob::after { /* the pointer notch, which also reports whether the set is on */
+            background: var(--brass);
+            border-radius: 1px;
+            content: '';
+            height: 0.55rem;
+            left: 50%;
+            position: absolute;
+            top: 0.18rem;
+            transform: translateX(-50%);
+            transform-origin: 50% 0.85rem;
+            transition: transform 220ms cubic-bezier(0.3, 1.4, 0.5, 1);
+            width: 2px;
+        }
+
+        /* The big knob is the power control. */
+        .knob.power { cursor: pointer; }
+        .knob.power:focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
+        .knob.power[aria-pressed='true']::after { transform: translateX(-50%) rotate(135deg); }
+
+        .knob.small { height: 1.5rem; width: 1.5rem; }
+        .knob.small::after { height: 0.38rem; transform-origin: 50% 0.6rem; }
+
+        /* ---- legs -------------------------------------------------------- */
+
+        .legs {
+            display: flex;
+            height: 3.2rem;
+            justify-content: space-between;
+            padding: 0 12%;
+        }
+
+        .legs span {
+            background: linear-gradient(180deg, var(--wood-lo), #24150b);
+            border-radius: 0 0 3px 3px;
+            box-shadow: 0 10px 14px -8px rgba(0, 0, 0, 0.8);
+            display: block;
+            height: 100%;
+            width: 0.7rem;
+        }
+
+        .legs span:first-child { transform: rotate(7deg); }
+        .legs span:last-child { transform: rotate(-7deg); }
+
+        @media (max-width: 46rem) {
+            .room { flex-direction: column; gap: 1.5rem; }
+            .channels { flex-direction: row; }
+            .tv { width: min(94vw, 40rem); }
+        }
+    </style>
+</head>
+<body>
+    <div class="room">
+        <nav class="channels">
+            <button class="channel" data-src="/live/rai1" aria-current="false">RAI 1</button>
+            <button class="channel" data-src="/live/rai2" aria-current="false">RAI 2</button>
+            <button class="channel" data-src="/live/tv8" aria-current="false">TV8</button>
+        </nav>
+
+        <div class="tv">
+            <div class="cabinet">
+                <div class="screen-well">
+                    <div class="screen" id="screen" data-state="off">
+                        <video id="tube" playsinline></video>
+                        <!-- No-signal snow, inline so it needs no separate request. -->
+                        <svg class="static" xmlns="http://www.w3.org/2000/svg"
+                             viewBox="0 0 300 225" preserveAspectRatio="none" aria-hidden="true">
+                            <filter id="snow">
+                                <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="4">
+                                    <animate attributeName="baseFrequency" dur="0.6s"
+                                             values="0.9;0.75;0.95;0.8;0.9" repeatCount="indefinite"/>
+                                </feTurbulence>
+                                <feColorMatrix type="saturate" values="0"/>
+                            </filter>
+                            <rect width="300" height="225" filter="url(#snow)" opacity="0.5"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="grille"></div>
+                    <!-- aria-label is not visible text, so the "name of the station only" rule holds
+                         while the control stays reachable from the keyboard. -->
+                    <button class="knob power" id="power" aria-pressed="false"
+                            aria-label="Accensione"></button>
+                    <div class="knob small"></div>
+                </div>
+            </div>
+            <div class="legs"><span></span><span></span></div>
+        </div>
+    </div>
+
+    <script>
+        const tube = document.getElementById('tube');
+        const screen = document.getElementById('screen');
+        const power = document.getElementById('power');
+        const channels = [...document.querySelectorAll('.channel')];
+
+        let powered = false;
+
+        function tune(button) {
+            channels.forEach(c => c.setAttribute('aria-current', String(c === button)));
+            powered = true;
+            power.setAttribute('aria-pressed', 'true');
+            screen.dataset.state = 'tuning';
+            tube.src = button.dataset.src;
+            tube.play().catch(() => { if (powered) screen.dataset.state = 'nosignal'; });
+        }
+
+        function powerOff() {
+            powered = false;
+            power.setAttribute('aria-pressed', 'false');
+            channels.forEach(c => c.setAttribute('aria-current', 'false'));
+
+            // Dropping the attribute and reloading is what actually aborts the request. Pausing
+            // would leave the connection open, and the server starts a whole ffmpeg pipeline per
+            // request -- so a paused tab would keep one running for nothing.
+            tube.pause();
+            tube.removeAttribute('src');
+            tube.load();
+            tube.controls = false;
+            screen.dataset.state = 'off';
+        }
+
+        channels.forEach(button => button.addEventListener('click', () => tune(button)));
+        power.addEventListener('click', () => (powered ? powerOff() : tune(channels[0])));
+
+        // Native controls only under the pointer. There is no CSS that hides them portably, so the
+        // attribute is toggled instead. Nothing overlays the picture any more, so they need no help
+        // to stay legible.
+        screen.addEventListener('mouseenter', () => { if (powered) tube.controls = true; });
+        screen.addEventListener('mouseleave', () => { tube.controls = false; });
+
+        // The set reports its own state: picture, or snow. No captions anywhere. The guard keeps a
+        // deliberate power-off from flashing snow, since clearing src also fires these.
+        //
+        // Deliberately NOT listening to 'stalled' or 'waiting': on a live stream both fire routinely
+        // whenever data is briefly late, and using them as a no-signal trigger left the screen stuck
+        // in snow on top of a picture that was still playing.
+        function picture() {
+            if (powered && screen.dataset.state !== 'on') screen.dataset.state = 'on';
+        }
+
+        tube.addEventListener('playing', picture);
+        // Frames advancing is the only honest evidence of a picture, and it also clears the snow by
+        // itself if a transient error set it.
+        tube.addEventListener('timeupdate', picture);
+
+        tube.addEventListener('error', () => { if (powered) screen.dataset.state = 'nosignal'; });
+        tube.addEventListener('ended', () => { if (powered) screen.dataset.state = 'nosignal'; });
+    </script>
+</body>
+</html>

@@ -27,6 +27,7 @@ extern "C"
 #include <map>
 #include <queue>
 #include <mutex>
+#include <atomic>
 #include <filesystem>
 
 // utils.h needs <sstream> and ThreadSafeQueue.h needs <optional>, but neither
@@ -40,6 +41,7 @@ extern "C"
 #include <microhttpd.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h> // _get_pgmptr, to resolve paths against the executable's own directory
 #include <conio.h>
 #include <utils.h>
 #include <avpp.h>
