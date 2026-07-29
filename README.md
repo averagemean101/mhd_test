@@ -82,7 +82,7 @@ Poi <http://127.0.0.1:8080/>, che serve la pagina con il link per avviare lo str
 | rotta | risposta |
 |---|---|
 | `GET /` | `www/index.html`: lista canali a sinistra, televisore a destra |
-| `GET /live/{rai1,rai2,rai3,italia1,tv8,20}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
+| `GET /live/{rai1,rai2,rai3,italia1,tv8,20,focus}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
 | `GET /live/<altro>` | `404` |
 | `GET /<path>` | file server, oppure l'elenco della cartella se `<path>` è una directory senza `index.html` |
 | fuori dal root | `403` |
@@ -93,10 +93,11 @@ Lo slug è confrontato **per intero** con il pezzo di path dopo `/live/`, ignora
 Prima era una ricerca di sottostringa, che con uno slug corto come `20` avrebbe risposto per
 qualunque path contenente quelle due cifre.
 
-Verificato sulle rotte, non solo sul canale: tutti e sei gli slug risolvono `200` sia nella forma
-nuda sia con lo slash finale (12 casi), e le quasi-collisioni restano `404` — `italia` che è prefisso
-di `italia1`, `2` che è sottostringa sia di `rai2` sia di `20`, `tv` prefisso di `tv8`, più `20x`,
-`canale20` e `rete4`.
+Verificato sulle rotte, non solo sul canale: ogni slug risolve `200` sia nella forma nuda sia con lo
+slash finale, e le quasi-collisioni restano `404` — `italia` che è prefisso di `italia1`, `2` che è
+sottostringa sia di `rai2` sia di `20`, `tv` prefisso di `tv8`, più `20x`, `canale20` e `rete4`. Per
+`focus`, aggiunto dopo, la stessa coppia più `focu` (prefisso) e `focus2` (estensione): `404`
+entrambi.
 
 Il root del file server è la cartella **`www/` accanto all'eseguibile**, non la working directory:
 il programma si lancia tipicamente come `.\build\Release\mhd_test.exe` dalla radice del repo, e un
@@ -105,7 +106,7 @@ accanto all'exe a ogni build, quindi **dopo aver editato la pagina serve un rebu
 
 ## Stato delle sorgenti (29/07/2026)
 
-Sei canali, tutti verificati end-to-end attraverso l'applicazione: ognuno consegna stream
+Sette canali, tutti verificati end-to-end attraverso l'applicazione: ognuno consegna stream
 decodificabile, e le due rotte di controllo `/live/rete4` e `/live/canale20` rispondono `404`.
 
 | canale | sorgente | note |
@@ -116,6 +117,17 @@ decodificabile, e le due rotte di controllo `/live/rete4` e `/live/canale20` ris
 | `italia1` | `live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8` | vedi «Mediaset» e il difetto sui 50 fps |
 | `tv8` | `mytivu.it/Application/Channels/TV8.php` | la `.php` conia un token Akamai nuovo a ogni chiamata: va invocata quella, **non** la URL che restituisce |
 | `20` | `.../live/ch-lb/lb-clr.isml/index.m3u8` | idem; il codice canale di «20» è `lb` |
+| `focus` | `.../live/ch-fu/fu-clr.isml/index.m3u8` | idem; codice `fu`. 1024x576 a 25 fps, non 50p come gli altri due Mediaset |
+
+`focus` è stato aggiunto e misurato **fuori dalla VPN aziendale**, a differenza dei rapporti
+contenuto/wall clock riportati più sotto, che sono tutti dietro proxy: 28,8 s di contenuto consegnati
+in 25,0 s di cattura (**1,15**), `r_frame_rate` `25/1` con 25,01 fps medi, zero errori di decodifica,
+nessun `MUXER: write failed`, e `4 unselected stream(s) discarded, 2 kept`.
+
+Porta lo stesso difetto di timestamp degli altri Mediaset, scalato al suo frame rate: `dts = pts +
+3600` a 90 kHz, cioè 40 ms, un intervallo di frame a 25 fps (sui 50p il delta è 1800). È stata anche
+la prima prova sul campo del filtro del log: oltre mille occorrenze ridotte a sette righe, e nove in
+tutto sullo stderr della sessione.
 
 ### Mediaset: l'host giusto, e come è stato trovato
 
@@ -127,6 +139,34 @@ L'host vivo è `live02-seg.msf.cdn.mediaset.net` (esiste anche `live03-seg`, non
 schema Unified Streaming `/live/ch-<id>/<id>-clr.isml/index.m3u8`. Il suffisso `-clr` è la resa in
 chiaro: le playlist non contengono `#EXT-X-KEY`, quindi non c'è niente da decifrare. Nessun `.mpd`
 è raggiungibile su quell'host: le tre forme provate rispondono `451`.
+
+### Trovare il codice `<id>` di un canale Mediaset
+
+Un `200` non identifica il canale. Sondando l'host, undici codici su diciassette rispondono con un
+master playlist valido, e i manifest sono **indistinguibili**: stessa versione di Unified Streaming,
+stesso gruppo audio, stesso ladder. L'unico campo che varia è il nome del file, che ripete il codice
+già scritto nella URL. Un codice sbagliato darebbe quindi un canale sbagliato che funziona
+perfettamente — il modo più subdolo di sbagliare.
+
+La mappatura sta fuori: si ricava dalle liste IPTV community, cercando il codice e leggendo il nome
+dell'`#EXTINF` che lo precede. Tre liste indipendenti concordano
+([Tundrak](https://raw.githubusercontent.com/Tundrak/IPTV-Italia/refs/heads/main/iptvita.m3u),
+[Free-TV](https://raw.githubusercontent.com/Free-TV/IPTV/master/playlists/playlist_italy.m3u8),
+[peppenamir](https://raw.githubusercontent.com/peppenamir/iptv_italia/main/lista.m3u)), e **il
+controllo è già in casa**: tutte e tre danno `i1` per Italia 1 e `lb` per «20», che sono i due codici
+che stiamo già usando e che abbiamo verificato per conto nostro. Una lista che sbagliasse quelli non
+meriterebbe fiducia sugli altri.
+
+I codici così ottenuti: `r4` Rete 4, `c5` Canale 5, `i1` Italia 1, `lb` 20, `ki` Iris, `ts` Twenty
+Seven, `ka` La 5, `b6` Cine34, **`fu` Focus**, `lt` Top Crime, `kb` Boing, `la` Cartoonito, `i2`
+Italia 2, `kf` TGcom24, `kq` Mediaset Extra.
+
+**Il riassunto generato da un motore di ricerca su queste stesse liste era sbagliato**: dava `fu` per
+RTL 102.5 e `b6` per Focus. Le liste, lette direttamente, dicono `fu` Focus e `b6` Cine34. Vale la
+pena andare alla fonte anche quando la risposta sintetizzata sembra precisa.
+
+L'API di Mediaset (`api-ott-prod-fe.mediaset.net/PROD/play/feed/allChannelHome/v2.0`), che darebbe la
+mappatura ufficiale, risponde `403` sia nuda sia con User-Agent, `Referer` e `Origin` da browser.
 
 ### I timestamp rotti di quei TS, e i due frame su tre che costavano
 
@@ -242,10 +282,13 @@ con un `podcastcdn/.../2606805.mp4`, cioè **VOD**.
 
 | ex canale | perché |
 |---|---|
-| `focus` | playlist Mediaset salvata nel 2021, il cui CDN non risolve più in DNS. `italia1` era nella stessa condizione ed è stato **recuperato** sul nuovo host: vedi sopra |
 | `Cielo` (mytivu) | l'endpoint esiste ma risponde `302` senza `Location` utile |
 
-Con le prime due sono spariti `DASHGenerator` e `HLSGenerator`, che erano già disattivati,
+**`focus` è rientrato il 29/07/2026** ed è ora nella tabella dei canali. Stava qui per lo stesso
+motivo di `italia1` — playlist Mediaset salvata nel 2021, il cui CDN non risolve più in DNS — e si
+recupera nello stesso modo, sull'host vivo con il codice `fu`.
+
+Con lui e con `Cielo` erano spariti `DASHGenerator` e `HLSGenerator`, che erano già disattivati,
 puntavano a quelle sorgenti e cablavano dei `filesystem::current_path("d:\...")` — cambiando la
 working directory **del processo**, quindi anche la risoluzione del file server.
 

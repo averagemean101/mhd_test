@@ -34,6 +34,7 @@ constexpr Channel CHANNELS[] = {
     { "italia1", "https://live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8" },
     { "tv8",     "https://www.mytivu.it/Application/Channels/TV8.php" },
     { "20",      "https://live02-seg.msf.cdn.mediaset.net/live/ch-lb/lb-clr.isml/index.m3u8" },
+    { "focus",   "https://live02-seg.msf.cdn.mediaset.net/live/ch-fu/fu-clr.isml/index.m3u8" },
 };
 
 // Returns the channel addressed by the request path, or nullptr.
