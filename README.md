@@ -160,6 +160,41 @@ stream; la strumentazione è stata rimossa, ma `send_pkt()` ora **dichiara** una
 (`MUXER: write failed on stream N, frame lost`, prime 8 per contesto). Prima l'unica traccia era il
 messaggio di FFmpeg, che non nomina lo stream e si perde in un log che il demuxer sta già riempiendo.
 
+### Quel `Invalid timestamps` continua a scorrere, ed è giusto così
+
+La riparazione è in `send_pkt()`, cioè **in scrittura**; il messaggio lo emette libavformat quando
+**legge** il pacchetto dalla sorgente, prima che il nostro codice lo tocchi. Dice cosa manda
+Mediaset, non cosa perdiamo noi, e resterebbe anche se il muxer fosse perfetto. Ogni pacchetto
+compare due volte, una per `[mpegts]` (il demuxer del segmento, `stream=0`) e una per `[hls]` (quello
+che lo incapsula, `stream=1`): stessi `pts`/`dts`/`size`, stessa diagnostica a due livelli. Il delta
+è sempre `1800` a 90 kHz, cioè 20 ms, un intervallo di frame a 50 fps.
+
+**Che non si stia perdendo nulla si verifica altrove**: dall'assenza di `MUXER: write failed on
+stream N, frame lost` e dal frame rate consegnato, non dal silenzio di questa riga.
+
+Restava il volume. Il filtro installato in `main()` limita **per tipo di messaggio**: prime 3
+occorrenze per intero, poi una riga che dichiara la soppressione, poi un ri-annuncio a ogni potenza
+di dieci, e a `Server stopped.` un riepilogo `Nx <messaggio>` di tutto ciò che è stato trattenuto —
+una sorgente che ripete la stessa diagnostica 16 000 volte è un fatto su quella sorgente, e il
+conteggio è l'unica traccia che ne resta.
+
+Il tipo è la **format string** (`"Invalid timestamps stream=%d, pts=%s, ..."`): i valori che variano
+stanno negli argomenti, quindi contare per format string collassa il diluvio senza toccare ciò che
+viene detto poche volte. Due alternative più economiche non funzionano, ed è il motivo per cui il
+filtro esiste: abbassare la soglia a `AV_LOG_ERROR` zittisce anche i warning che compaiono una volta
+sola, che sono quelli che contano; `AV_LOG_SKIP_REPEATED` unisce solo righe **identiche**, e queste
+differiscono in ogni timestamp.
+
+Il callback fa da sé il filtro di severità (mascherando i bit di colore di `AV_LOG_C()`): riceve il
+messaggio, non è documentato che lo riceva già filtrato, e contare righe che non verrebbero comunque
+stampate falserebbe i totali. Scrive su `cerr`, dove scrive `av_log_default_callback`: su `cout` le
+note si staccherebbero dai messaggi che annotano appena uno dei due stream viene rediretto. Ed è
+thread safe, perché libav logga dai suoi thread di decodifica e qui anche da un thread di streaming
+**per client**.
+
+Nella stessa modifica `av_log_set_level` si è spostata da `streaming_core()` a `main()`: è
+un'impostazione di processo e veniva rieseguita a ogni richiesta, da un thread di streaming.
+
 ### Le varianti non usate non si scaricano più
 
 Lo stesso contatore ha fatto emergere un secondo difetto, indipendente: su `italia1` arrivavano 1448

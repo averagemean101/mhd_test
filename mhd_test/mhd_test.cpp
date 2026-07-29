@@ -81,6 +81,99 @@ static filesystem::path exe_directory()
     return filesystem::path{ pgm }.parent_path();
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////// FFMPEG LOG
+
+// FFmpeg's diagnostics are worth keeping -- the Mediaset timestamp defect was found through them --
+// but a source with a systematic defect repeats the same one for every packet: one session produced
+// 16741 identical "Invalid timestamps" lines, which bury everything else, including the messages
+// that only appear once and matter most.
+//
+// So the limit is per message *kind*, not per severity: dropping AV_LOG_WARNING would silence the
+// one-off warnings too. The format string is the kind -- the timestamps that vary live in the
+// arguments -- so counting by it collapses a flood into one entry while leaving anything said only
+// a few times untouched.
+//
+// AV_LOG_SKIP_REPEATED does not do this: it only collapses lines that come out identical, and these
+// differ in every timestamp.
+constexpr int FFMPEG_LOG_LINES_PER_KIND = 3;
+
+static mutex g_ffmpeg_log_mutex;
+static map<string, long long> g_ffmpeg_log_counts;
+
+// A message is re-announced when its count reaches a power of ten, so a long run stays visible
+// without flooding: 10, 100, 1000 ... and nothing in between.
+static bool is_power_of_ten(long long n)
+{
+    while (n >= 10 && n % 10 == 0) {
+        n /= 10;
+    }
+    return n == 1;
+}
+
+// The format string carries its own trailing newline and would break the lines we wrap it in.
+static string one_line(const string& fmt)
+{
+    const auto end = fmt.find_last_not_of(" \t\r\n");
+    return end == string::npos ? fmt : fmt.substr(0, end + 1);
+}
+
+// Installed with av_log_set_callback, so it must be thread safe: libav* logs from its own decoding
+// threads, and here also from one streaming thread per connected client.
+//
+// Everything this function prints goes to cerr, where av_log_default_callback writes: on cout the
+// notices would drift away from the messages they annotate as soon as either stream is redirected.
+static void ffmpeg_log_cb(void* avcl, int level, const char* fmt, va_list vl)
+{
+    // Filter by severity here instead of assuming the caller already did: a custom callback is
+    // documented to receive the message, not to receive it pre-filtered, and counting lines that
+    // would never be printed would make the tallies meaningless. The low byte is the level, the rest
+    // can carry the colour bits of AV_LOG_C(); a negative level is AV_LOG_QUIET and is left alone.
+    int severity = level;
+    if (severity >= 0) {
+        severity &= 0xff;
+    }
+    if (severity > ::av_log_get_level()) {
+        return;
+    }
+
+    long long n = 0;
+    {
+        lock_guard<mutex> lock(g_ffmpeg_log_mutex);
+        n = ++g_ffmpeg_log_counts[fmt ? fmt : "(no format string)"];
+    }
+
+    if (n <= FFMPEG_LOG_LINES_PER_KIND) {
+        ::av_log_default_callback(avcl, level, fmt, vl);
+        if (n == FFMPEG_LOG_LINES_PER_KIND) {
+            cerr << "  LOG: further occurrences of the message above are counted, not printed.\n";
+        }
+        return;
+    }
+
+    if (is_power_of_ten(n)) {
+        cerr << "  LOG: " << n << " occurrences so far: " << one_line(fmt ? fmt : "") << "\n";
+    }
+}
+
+// What the rate limiter held back. A source that repeats one message ten thousand times is a fact
+// about that source, and once the lines are gone the count is the only trace of it left.
+static void dump_ffmpeg_log_tally()
+{
+    lock_guard<mutex> lock(g_ffmpeg_log_mutex);
+
+    bool any = false;
+    for (const auto& entry : g_ffmpeg_log_counts) {
+        if (entry.second <= FFMPEG_LOG_LINES_PER_KIND) {
+            continue;
+        }
+        if (!any) {
+            cerr << "FFmpeg messages that were rate-limited:\n";
+            any = true;
+        }
+        cerr << "  " << entry.second << "x " << one_line(entry.first) << "\n";
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////// STREAM GENERATORS
 
 class BaseGenerator {
@@ -350,7 +443,6 @@ public:
     virtual int streaming_core() override
     {
         auto wr_cb = [&](const uint8_t* a, int b)->int { return this->write_cb(a, b); };
-        ::av_log_set_level(AV_LOG_WARNING);
 
         // Already resolved by LivePage. Not lowercased: these URLs carry case-sensitive tokens, and
         // the tv8 endpoint mints a fresh one on every call, so it is the URL to open -- never the one
@@ -577,6 +669,11 @@ public:
 
 int main(int argc, char** argv) 
 {
+    // Both settings are process-wide, so they belong here. av_log_set_level used to be called from
+    // streaming_core(), i.e. once per connected client, on a thread that had no business owning it.
+    ::av_log_set_level(AV_LOG_WARNING);
+    ::av_log_set_callback(&ffmpeg_log_cb);
+
     LivePage live;
     FilesPage files;
     WebServer server(8080);
@@ -593,6 +690,7 @@ int main(int argc, char** argv)
     cout << "Server started on port " << server.get_port() << ".\n";
     server.wait_and_stop();
     cout << "Server stopped.\n";
+    dump_ffmpeg_log_tally();
 
     return 0;
 }
