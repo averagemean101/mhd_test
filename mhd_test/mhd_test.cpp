@@ -29,6 +29,8 @@ constexpr Channel CHANNELS[] = {
                  "?cont=2606803&output=7&forceUserAgent=raiplayappletv" },
     { "rai2",    "https://mediapolis.rai.it/relinker/relinkerServlet.htm"
                  "?cont=308718&output=7&forceUserAgent=raiplayappletv" },
+    { "rai3",    "https://mediapolis.rai.it/relinker/relinkerServlet.htm"
+                 "?cont=308709&output=7&forceUserAgent=raiplayappletv" },
     { "italia1", "https://live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8" },
     { "tv8",     "https://www.mytivu.it/Application/Channels/TV8.php" },
     { "20",      "https://live02-seg.msf.cdn.mediaset.net/live/ch-lb/lb-clr.isml/index.m3u8" },

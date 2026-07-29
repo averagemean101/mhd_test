@@ -82,16 +82,21 @@ Poi <http://127.0.0.1:8080/>, che serve la pagina con il link per avviare lo str
 | rotta | risposta |
 |---|---|
 | `GET /` | `www/index.html`: lista canali a sinistra, televisore a destra |
-| `GET /live/{rai1,rai2,italia1,tv8,20}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
+| `GET /live/{rai1,rai2,rai3,italia1,tv8,20}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
 | `GET /live/<altro>` | `404` |
 | `GET /<path>` | file server, oppure l'elenco della cartella se `<path>` è una directory senza `index.html` |
 | fuori dal root | `403` |
 
 I canali stanno nella tabella `CHANNELS` di [mhd_test.cpp](mhd_test/mhd_test.cpp): aggiungerne uno è una riga lì più un `<button>` in `www/index.html`. `LivePage` risolve lo slug e passa la URL già risolta al generator, che quindi non ripete la ricerca.
 
-Lo slug è confrontato **per intero** con il pezzo di path dopo `/live/`. Prima era una ricerca di
-sottostringa, che con lo slug `20` avrebbe risposto per qualunque path contenente quelle due cifre:
-`/live/canale20` restituisce `404`, come deve.
+Lo slug è confrontato **per intero** con il pezzo di path dopo `/live/`, ignorando uno slash finale.
+Prima era una ricerca di sottostringa, che con uno slug corto come `20` avrebbe risposto per
+qualunque path contenente quelle due cifre.
+
+Verificato sulle rotte, non solo sul canale: tutti e sei gli slug risolvono `200` sia nella forma
+nuda sia con lo slash finale (12 casi), e le quasi-collisioni restano `404` — `italia` che è prefisso
+di `italia1`, `2` che è sottostringa sia di `rai2` sia di `20`, `tv` prefisso di `tv8`, più `20x`,
+`canale20` e `rete4`.
 
 Il root del file server è la cartella **`www/` accanto all'eseguibile**, non la working directory:
 il programma si lancia tipicamente come `.\build\Release\mhd_test.exe` dalla radice del repo, e un
@@ -100,14 +105,14 @@ accanto all'exe a ogni build, quindi **dopo aver editato la pagina serve un rebu
 
 ## Stato delle sorgenti (29/07/2026)
 
-Cinque canali, tutti verificati end-to-end attraverso l'applicazione: ognuno consegna stream
-decodificabile (18/18/1,8/7,8/2,5 MB in 12 s), e le due rotte di controllo `/live/rete4` e
-`/live/canale20` rispondono `404`.
+Sei canali, tutti verificati end-to-end attraverso l'applicazione: ognuno consegna stream
+decodificabile, e le due rotte di controllo `/live/rete4` e `/live/canale20` rispondono `404`.
 
 | canale | sorgente | note |
 |---|---|---|
 | `rai1` | relinker Rai, `cont=2606803` | vedi sotto |
 | `rai2` | relinker Rai, `cont=308718` | vedi sotto |
+| `rai3` | relinker Rai, `cont=308709` | 1920x1080, 24,5 fps consegnati, 50 s di contenuto in 28,8 s |
 | `italia1` | `live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8` | vedi «Mediaset» e il difetto sui 50 fps |
 | `tv8` | `mytivu.it/Application/Channels/TV8.php` | la `.php` conia un token Akamai nuovo a ogni chiamata: va invocata quella, **non** la URL che restituisce |
 | `20` | `.../live/ch-lb/lb-clr.isml/index.m3u8` | idem; il codice canale di «20» è `lb` |
@@ -194,9 +199,9 @@ Ed è l'unica opzione HTTP che `ffio_copy_url_options()` propaga ai contesti ann
 impostarla una volta copre playlist e segmenti — a differenza di `tls_verify`, che ha bisogno
 dell'hook `io_open`.
 
-Verificato che gli stessi ID valgono anche per `rai3` (`cont=308709`): aggiungerlo è una riga.
-Attenzione invece agli ID indovinati: `cont=2606805` risponde con un `podcastcdn/.../2606805.mp4`,
-cioè **VOD**, non il canale live.
+`rai3` (`cont=308709`) è stato aggiunto con questo schema e verificato: 1920x1080 come `rai1`, quindi
+è il canale live e non un asset VOD. Attenzione appunto agli ID indovinati: `cont=2606805` risponde
+con un `podcastcdn/.../2606805.mp4`, cioè **VOD**.
 
 ### Sorgenti rimosse
 
@@ -304,3 +309,51 @@ legge come file corrotto: `output_handed_over` blocca il retry, e finché è fal
   progetto `v` no.
 - Il file server non manda `Content-Type` per nulla che non sia `.html`: le altre estensioni
   arrivano senza, e il browser tira a indovinare.
+
+---
+
+## Prossimi passi — annotati, non implementati
+
+Tre idee raccolte il 29/07/2026, da riprendere sull'altro PC. Nessuna è iniziata: qui c'è il
+contesto che serve per decidere, non un progetto.
+
+### 1. Un file di configurazione
+
+Il candidato che rende la cosa necessaria è **`insecure_tls`**. Oggi vale `"1"` incondizionatamente
+in [mhd_test.cpp](mhd_test/mhd_test.cpp), quindi la verifica del certificato è disattivata su *tutte*
+le connessioni di ogni stream, sempre. Serve solo dietro il proxy aziendale con TLS inspection (vedi
+la sezione «HTTPS dietro un proxy con TLS inspection»): fuori da quella rete il programma è meno
+sicuro di quanto sembri leggendolo, e il commento accanto all'opzione parla di una condizione che
+**non esiste** nel codice. È il motivo principale per fare questo passo, non un dettaglio di comodo.
+
+Altri candidati, tutti oggi cablati: la porta (`8080`), lo `User-Agent` da browser, `max_retries` e
+il backoff del retry, `http_persistent` e `seg_max_retry`, il sottoalbero servito (`www`), e
+plausibilmente la tabella `CHANNELS`, che è l'unica ragione per cui aggiungere un canale richiede un
+rebuild.
+
+Da decidere prima di scrivere codice: **formato** (un `.ini` piatto si scrive senza dipendenze, un
+JSON richiede una libreria), **posizione** (accanto all'eseguibile, come già fa `www/`), e cosa
+succede **se il file manca** — la risposta giusta è probabilmente «default sicuri», cioè
+`insecure_tls` a `0`, così l'impostazione pericolosa va chiesta esplicitamente.
+
+### 2. Trasformarlo in un servizio
+
+Oggi `main()` resta appeso a `getc(stdin)` e la chiusura pulita è un `\n`. Come servizio quel
+modello non esiste: non c'è stdin.
+
+Il vincolo vero è che il progetto deve buildare anche su Linux, quindi sono **due** integrazioni
+diverse — `ServiceMain`/SCM su Windows, unit `systemd` con `Type=notify` su Linux — e va isolata
+dietro un'astrazione sottile, non sparsa nel codice. Servono comunque, in entrambi i casi: un log su
+file o su journal invece che su `std::cout`, e un percorso di shutdown che non passi da stdin (quindi
+la separazione `listen()`/`wait_and_stop()` già fatta in `HttpServer.h` è il pezzo giusto su cui
+appoggiarsi). Da valutare se non basti, molto più a buon mercato, un task pianificato o un
+`systemd` unit banale che lancia l'eseguibile così com'è.
+
+### 3. Due antennine a V sopra il televisore
+
+Puramente estetico, tutto in [www/index.html](www/index.html). Vanno sopra `.cabinet`, con
+`transform: rotate()` sui due bracci e `transform-origin` alla base, e devono stare **fuori** dal
+flusso che dimensiona lo schermo, altrimenti spostano il 16:9. Servono `pointer-events: none` come
+già per gli altri ornamenti, e un `z-index` sotto al mobile se si vuole l'effetto «piantate dietro».
+Attenzione al layout responsive: la media query a schermo stretto mette la lista canali in riga, e
+un'antenna che sborda va gestita lì.
