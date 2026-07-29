@@ -357,3 +357,46 @@ flusso che dimensiona lo schermo, altrimenti spostano il 16:9. Servono `pointer-
 già per gli altri ornamenti, e un `z-index` sotto al mobile se si vuole l'effetto «piantate dietro».
 Attenzione al layout responsive: la media query a schermo stretto mette la lista canali in riga, e
 un'antenna che sborda va gestita lì.
+
+### 4. Verifica con client multipli, server su un PC e client su un altro
+
+**Non è mai stato provato.** Tutti i test fatti finora sono sequenziali e su loopback: l'unica
+concorrenza osservata è stata l'accavallamento transitorio di due generator durante un teardown
+(`MP4 DELETED 1, generators still streaming: 1`).
+
+Il fatto architetturale da cui partire: `LivePage::createResponse` fa `new MP4Generator(...)` **a ogni
+richiesta**, e ogni generator apre il proprio input FFmpeg. Non c'è nessun fan-out, quindi *N* client
+sullo stesso canale scaricano *N* volte la stessa sorgente. Banda a monte e thread crescono col numero
+di client, non di canali — e i thread si sommano: `MHD_USE_THREAD_PER_CONNECTION` ne mette uno per
+connessione, più uno di streaming per generator, più quelli di libav (`get_enc_dec_threads()`, oggi
+limitata a 16). Se emergesse un limite, la risposta giusta è probabilmente condividere un generator
+fra i client dello stesso canale, che però cambia il modello: il fMP4 va servito a partire da un
+`ftyp`/`moov` per ciascuno.
+
+Cosa misurare, con gli strumenti già scritti: il rapporto **contenuto consegnato / wall clock** per
+ogni client (deve restare ≥ 1,0, come nella sezione sulle varianti scartate) e il conteggio
+`generators still streaming` alla disconnessione, che deve tornare a zero.
+
+Tre rischi che la concorrenza amplifica, tutti già noti: il race su `cancel_read` (più teardown
+simultanei, più probabilità di incrociarlo), la coda dell'header che cresce senza limite se uno
+stream non riceve mai pacchetti (§5 del README di `common`), e il rate limiting sull'endpoint mytivu,
+che conia un token per chiamata — con più client simultanei è il primo candidato a rispondere male.
+
+**Sull'ambiente, verificato il 29/07/2026 su questo PC:**
+
+- il server ascolta su `0.0.0.0:8080`, quindi è raggiungibile da rete **senza modifiche al codice**;
+- `www/index.html` usa URL relative (`/live/...`), quindi funziona da un altro host così com'è;
+- **ma** esistono otto regole firewall inbound **di Block** per `mhd_test.exe`, attive sui profili
+  Private e Public — nate dai prompt di Windows a ogni nuovo eseguibile. Con quelle in piedi il test
+  cross-machine falliva per una ragione che non ha niente a che vedere col codice. Da ispezionare
+  prima di iniziare:
+
+  ```powershell
+  Get-NetFirewallApplicationFilter | Where-Object { $_.Program -like '*mhd_test*' } |
+      ForEach-Object { Get-NetFirewallRule -AssociatedNetFirewallApplicationFilter $_ } |
+      Select-Object DisplayName, Direction, Action, Enabled, Profile
+  ```
+
+- attenzione all'indirizzo su cui puntare il client: questa macchina è multi-homed (vedi «DNS
+  ballerino»), e fra le interfacce ci sono adattatori VMware, un adattatore Cato e diversi
+  link-local `169.254.*`. Va usato l'IP dell'interfaccia Ethernet reale, non il primo che si trova.
