@@ -175,7 +175,15 @@ public:
             live_url = "d:\\downloads\\tv\\Focus.m3u8";
         }
 
-        auto input = avpp::format_open_input(live_url, prog_cb, "", { { "protocol_whitelist" , "file,https,tcp,tls,crypto" } });
+        auto input = avpp::format_open_input(live_url, prog_cb, "", {
+            { "protocol_whitelist" , "file,https,tcp,tls,crypto" },
+            // Required only behind the corporate TLS-inspecting proxy, which
+            // breaks certificate revocation checking for every https source.
+            // This turns off peer verification on ALL connections of this
+            // stream: see the README section on TLS inspection before removing
+            // the condition or making it unconditional.
+            { "insecure_tls" , "1" }
+        });
         input.dump_format();
         input.open_best_streams();
         input.add_filter_graph(input.id_audio, { 

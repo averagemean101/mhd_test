@@ -1,7 +1,7 @@
-# Build output e stato dell'IDE
+# Build output e stato dell'IDE. In build/ finisce tutto quello che genera CMake,
+# inclusi la solution e il .vcxproj: sono artefatti, non sorgenti.
 .vs/
-x64/
-Win32/
+build/
 ipch/
 *.user
 *.aps

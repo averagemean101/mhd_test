@@ -1,0 +1,44 @@
+{
+    // ------------------------------------------------------------------
+    // IntelliSense
+    // ------------------------------------------------------------------
+    // CMake Tools is the authoritative source: it hands cpptools the real
+    // include paths and defines of the mhd_test target, so nothing here has to
+    // be kept in sync with CMakeLists.txt by hand.
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+
+    // Fallback, used before the first successful configure and for headers that
+    // belong to no target -- notably the ones in ../common, which sit outside
+    // this workspace. Keep it in sync with target_include_directories().
+    "C_Cpp.default.includePath": [
+        // stdafx.h lives here, and common/avpp.cpp includes it from outside.
+        "${workspaceFolder}/mhd_test",
+        // utils.h, avpp.h, ThreadSafeQueue.h, HttpServer.h
+        "${workspaceFolder}/../common",
+        // libavcodec/, libavformat/, libavfilter/, libavdevice/, libavutil/
+        "${workspaceFolder}/../ffmpeg/include",
+        // microhttpd.h. All four vendored variants ship a byte-identical header,
+        // so which one this points at does not matter for IntelliSense.
+        "${workspaceFolder}/third_party/libmicrohttpd-0.9.73-w32-bin/x86_64/VS2019/Release-dll"
+    ],
+
+    // Mirrors the build so IntelliSense does not accept what the compiler will
+    // reject. c++17 in particular: at /std:c++latest the missing <sstream> and
+    // <optional> includes in ../common arrived transitively and hid a real bug.
+    "C_Cpp.default.defines": [
+        "UNICODE",
+        "_UNICODE",
+        "_CONSOLE",
+        "MHD_W32DLL"
+    ],
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.intelliSenseMode": "windows-msvc-x64",
+
+    // ------------------------------------------------------------------
+    // CMake
+    // ------------------------------------------------------------------
+    // The project ships CMakePresets.json, and the win64 preset is the only
+    // supported configuration. Without this, CMake Tools would ask about kits
+    // and could configure with a generator the project does not support.
+    "cmake.useCMakePresets": "always"
+}

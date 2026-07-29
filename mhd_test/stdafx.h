@@ -29,6 +29,14 @@ extern "C"
 #include <mutex>
 #include <filesystem>
 
+// utils.h needs <sstream> and ThreadSafeQueue.h needs <optional>, but neither
+// includes them. Under /std:c++latest they arrived transitively through other
+// standard headers; at /std:c++17 they do not. They are listed here, and not
+// fixed in common/, because that is a separate repository shared with another
+// project.
+#include <sstream>
+#include <optional>
+
 #include <microhttpd.h>
 #include <signal.h>
 #include <stdio.h>
