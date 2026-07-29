@@ -373,6 +373,62 @@ il primo byte consegnato, riavviare emetterebbe un secondo `ftyp/moov` a metà s
 legge come file corrotto: `output_handed_over` blocca il retry, e finché è falso
 `discard_pending_output()` butta ciò che il tentativo fallito aveva accodato.
 
+## Quando la sorgente muore a metà: il fallimento che si traveste da successo
+
+Sintomo osservato il 29/07/2026 su `focus`, **fuori dalla VPN**: ogni tanto l'immagine si ferma e non
+riparte più; ricliccare il canale la fa ripartire subito. Log del server al momento dello stop:
+
+```
+[tls @ ...] Creating security context failed (0x80090304)
+[hls @ ...] Failed to reload playlist 1
+  DEMUX: real EOF.
+  MUXER: trailer written (2276).
+```
+
+La catena, e dove si perde l'informazione:
+
+1. `0x80090304` è `SEC_E_INTERNAL_ERROR` — «The Local Security Authority cannot be contacted»,
+   risolto interrogando il sistema. È **Schannel sulla macchina locale** che non riesce a creare il
+   contesto TLS: con la CDN non si è nemmeno parlato. Da non confondere con `0x80092012` della
+   sezione sul proxy: quello è la revoca, questo è un fallimento locale e transitorio.
+2. `hls` non può rinfrescare la media playlist, quindi resta senza segmenti.
+3. **Il demuxer traduce quel fallimento in EOF**, indistinguibile da una sorgente finita davvero. È
+   qui che l'informazione si perde: da questo punto in poi tutti si comportano correttamente su una
+   premessa falsa.
+4. Il server ci crede, scrive il trailer e chiude la risposta pulita: `200`, corpo completo.
+5. `<video>` riceve un file finito e si ferma. Non ritenta perché non ha niente a cui reagire.
+
+Tre ragioni **indipendenti** per cui non si ripara da solo: `hls` non insiste sul reload fallito
+(`seg_max_retry` copre i segmenti, non le playlist); il server si vieta il retry a byte già
+consegnati, per la regola della sezione precedente; il client vede una fine normale.
+
+### Il recupero sta nel client, perché è l'unico punto dove è legittimo
+
+Una richiesta **nuova** produce una risposta nuova, quindi un `ftyp/moov` nuovo è corretto: è
+esattamente ciò che fa ricliccare il canale a mano, e `www/index.html` ora lo fa da sé. Su `ended`
+ri-sintonizza lo stesso canale fino a **5 tentativi** con backoff crescente, con un `?t=<timestamp>`
+in coda alla URL — sulla stessa URL il browser può rigiocarsi la risposta appena finita invece di
+chiederne una nuova. Il server non la vede: MHD separa la query dal path prima del router
+(verificato, `/live/focus?t=123` → `200 video/mp4`).
+
+Tre dettagli non ovvi:
+
+- un **contatore di generazione** invalida un recupero già in coda se nel frattempo l'utente cambia
+  canale o spegne, altrimenti un timer partito prima cambierebbe canale sotto le mani;
+- il **budget si ricarica** dopo 5 s di riproduzione sana, altrimenti un canale guardato un'ora
+  affronterebbe la prima vera interruzione con i tentativi spesi per un singhiozzo di un'ora prima;
+- si ascolta **solo `ended`, non `error`**, ed è deliberato. Assegnare un nuovo `src` aborta la
+  richiesta in volo e il browser può segnalare quell'abort come errore sull'elemento: recuperare da
+  `error` farebbe sì che un cambio canale programmi un «recupero» che taglia il canale appena
+  sintonizzato. `ended` non scatta su un load abortito, quindi il trigger più stretto non ha bisogno
+  di euristiche. Prezzo dichiarato: una risposta che si spezza **senza** chiudersi pulita resta neve
+  finché l'utente non interviene.
+
+**Non verificato a runtime.** Su questa macchina non c'è nessun runtime JavaScript e non c'è un
+browser pilotabile: il codice è stato controllato rileggendolo, non eseguendolo. La conferma sul
+campo è nel log del server — un secondo `MUXER: header written.` entro pochi secondi dal
+`DEMUX: real EOF.`, senza che nessuno abbia cliccato.
+
 ## Difetti noti, non corretti
 
 - **Race residuo su `cancel_read`.** `request_cancel()` scrive `FormatContext::cancel_read` mentre
@@ -408,6 +464,22 @@ Altri candidati, tutti oggi cablati: la porta (`8080`), lo `User-Agent` da brows
 il backoff del retry, `http_persistent` e `seg_max_retry`, il sottoalbero servito (`www`), e
 plausibilmente la tabella `CHANNELS`, che è l'unica ragione per cui aggiungere un canale richiede un
 rebuild.
+
+Un candidato è salito di rango: **`http_persistent`**, oggi `"0"` per tutti. È stato messo per il
+proxy aziendale, che uccide le connessioni persistenti, ma il suo effetto è aprire una connessione
+TLS **nuova a ogni reload di playlist e a ogni segmento** — cioè un handshake ogni pochi secondi, e
+ogni handshake un'occasione per il `0x80090304` che interrompe lo stream (vedi la sezione sopra).
+Fuori dalla VPN è quindi tutto costo e nessun beneficio, esattamente come `insecure_tls`: stesso
+schema, due impostazioni che servono solo dentro quella rete e che fuori peggiorano le cose. Cablarle
+al valore opposto non risolverebbe, sposterebbe solo il problema all'altro ambiente.
+
+Ci va anche il **log level di libav** — `AV_LOG_WARNING` fisso in `main()` — e con lui
+`FFMPEG_LOG_LINES_PER_KIND`, la soglia del filtro descritto sopra. Sono i due parametri che si
+vogliono cambiare proprio quando ricompilare è scomodo: per indagare una sorgente che si comporta
+male si alza a `AV_LOG_VERBOSE`, o si toglie il limite per vedere tutte le righe, e appena finito si
+torna indietro. Nota di merito rispetto agli altri candidati: sono le uniche due impostazioni che
+**non** cambiano cosa fa il programma, solo cosa racconta, quindi si possono rendere configurabili
+senza alcun rischio sul comportamento.
 
 Da decidere prima di scrivere codice: **formato** (un `.ini` piatto si scrive senza dipendenze, un
 JSON richiede una libreria), **posizione** (accanto all'eseguibile, come già fa `www/`), e cosa

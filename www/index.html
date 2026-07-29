@@ -272,17 +272,60 @@
 
         let powered = false;
 
-        function tune(button) {
+        // A live source can die mid-stream: the server writes the trailer and closes cleanly, so what
+        // reaches the browser is a finite file that has simply finished. The picture stops on the last
+        // frame and nothing retries, because from here nothing looks wrong.
+        //
+        // The server cannot repair it from its side. Restarting its input would push a second
+        // ftyp/moov into a response the client is already reading, which a player reads as a corrupt
+        // file -- so streaming_thread deliberately refuses to retry once bytes have gone out. Only a
+        // NEW request can restart a stream, which is exactly what clicking the channel again does by
+        // hand. So do that automatically.
+        const MAX_RECONNECTS = 5;
+
+        let current = null;      // the tuned button, so a recovery knows what to ask for again
+        let tuneGen = 0;         // bumped on every tune: invalidates a recovery the user overtook
+        let reconnects = 0;
+        let reconnecting = false;
+
+        function tune(button, isRecovery) {
             channels.forEach(c => c.setAttribute('aria-current', String(c === button)));
             powered = true;
+            current = button;
+            tuneGen++;
+            if (!isRecovery) reconnects = 0;
             power.setAttribute('aria-pressed', 'true');
             screen.dataset.state = 'tuning';
-            tube.src = button.dataset.src;
+            // The query string is what makes this a new request: on the same URL the browser may
+            // replay the response that just ended instead of asking the server for a fresh stream.
+            // The server never sees it -- MHD splits the query off the path before the router does.
+            tube.src = button.dataset.src + '?t=' + Date.now();
             tube.play().catch(() => { if (powered) screen.dataset.state = 'nosignal'; });
+        }
+
+        function scheduleReconnect() {
+            // Two events can report the same death, so only one recovery is ever in flight.
+            if (!powered || !current || reconnecting) return;
+            if (reconnects >= MAX_RECONNECTS) return; // a source that is really gone stays snow
+
+            reconnects++;
+            reconnecting = true;
+            const gen = tuneGen;
+            // Growing backoff: the first attempt covers the usual case, a single failed playlist
+            // reload, and a source that needs longer is not helped by being hammered.
+            setTimeout(() => {
+                reconnecting = false;
+                // Dropped if the user retuned or switched off in the meantime.
+                if (powered && current && gen === tuneGen) tune(current, true);
+            }, 700 * reconnects);
         }
 
         function powerOff() {
             powered = false;
+            // Both are what a pending recovery checks: switching off must not be undone by a timer
+            // that was already ticking.
+            current = null;
+            tuneGen++;
             power.setAttribute('aria-pressed', 'false');
             channels.forEach(c => c.setAttribute('aria-current', 'false'));
 
@@ -313,6 +356,11 @@
         // in snow on top of a picture that was still playing.
         function picture() {
             if (powered && screen.dataset.state !== 'on') screen.dataset.state = 'on';
+            // A stream that has been running a while is healthy, whatever happened before it: give it
+            // back a full recovery budget. Without this, a channel watched for an hour would face its
+            // first real interruption with the attempts it spent on an unrelated hiccup at minute two.
+            // currentTime restarts from zero on every request, so it measures this attempt alone.
+            if (reconnects && tube.currentTime > 5) reconnects = 0;
         }
 
         tube.addEventListener('playing', picture);
@@ -321,7 +369,22 @@
         tube.addEventListener('timeupdate', picture);
 
         tube.addEventListener('error', () => { if (powered) screen.dataset.state = 'nosignal'; });
-        tube.addEventListener('ended', () => { if (powered) screen.dataset.state = 'nosignal'; });
+
+        // Only 'ended' triggers a recovery, and that is deliberate. It is also exactly the failure
+        // observed: a source that dies mid-stream arrives here as a clean end of file, because the
+        // server wrote a valid trailer over what was really an interrupted input.
+        //
+        // 'error' is left out on purpose. Assigning a new src aborts the request in flight, and the
+        // browser can report that abort as an error on the element -- so recovering from 'error' would
+        // let a channel change schedule a "recovery" that cuts off the channel just tuned. Guarding it
+        // with a settling window would work, but 'ended' does not fire on an aborted load at all, so
+        // the narrower trigger needs no heuristic. A response that breaks without ending cleanly is
+        // therefore still snow until the user acts: the cost of not guessing.
+        tube.addEventListener('ended', () => {
+            if (!powered) return;
+            screen.dataset.state = 'nosignal';
+            scheduleReconnect();
+        });
     </script>
 </body>
 </html>
