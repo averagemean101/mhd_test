@@ -72,6 +72,11 @@ ricompilato, altrimenti l'eseguibile non parte affatto.
 mhd_test.exe        # server sulla porta 8080, ENTER per chiudere
 ```
 
+Se la porta è occupata l'eseguibile lo dice e ritorna 1, senza annunciare un avvio che non c'è
+stato. Con stdin chiusa o rediretta dal nulla, `getc` vedrebbe EOF subito: in quel caso il server
+**resta su** e va terminato con un segnale. Per pilotarlo da script basta tenere stdin aperta e
+mandare `\n`, che è anche l'unico modo per far flushare `std::cout` quando è rediretto su file.
+
 Poi <http://127.0.0.1:8080/>, che serve la pagina con il link per avviare lo stream.
 
 | rotta | risposta |
@@ -193,22 +198,35 @@ consegna un init segment fMP4 valido, senza nessun `0x80092012`.
 stream. Dietro un proxy che ispeziona già il traffico il downgrade è più nominale che sostanziale,
 ma resta un downgrade. Fuori dalla VPN aziendale l'opzione va tolta.
 
+## Come è coordinato il producer/consumer
+
+Il thread di streaming produce, `get_buffer` consuma sul thread di MHD, e il coordinamento passa
+per tre atomiche invece che per il puntatore `media_in`:
+
+| stato | significato per `get_buffer` |
+|---|---|
+| coda non vuota | consegna un elemento |
+| coda vuota, `streaming_done == false` | **attende**: la sorgente può ancora aprirsi o essere in retry |
+| coda vuota, `streaming_done == true` | fine: `END_WITH_ERROR` se `streaming_failed`, altrimenti `END_OF_STREAM` |
+
+`get_buffer` non legge più `media_in`, che è privato e sotto mutex: lo pubblica `PublishedInput`,
+un guard RAII dichiarato **dopo** la `FormatContext` a cui punta, così l'ordine inverso di
+distruzione lo ritira prima che l'oggetto muoia. `request_cancel()` prende lo stesso lock, quindi
+non può mai toccare una `FormatContext` in distruzione.
+
+`Run()` non attende: la risposta viene committata subito e l'attesa la fa il consumatore. Da qui
+segue una regola non ovvia — **un retry è ammesso solo finché il client non ha visto nulla**. Dopo
+il primo byte consegnato, riavviare emetterebbe un secondo `ftyp/moov` a metà stream, che un player
+legge come file corrotto: `output_handed_over` blocca il retry, e finché è falso
+`discard_pending_output()` butta ciò che il tentativo fallito aveva accodato.
+
 ## Difetti noti, non corretti
 
-- `main()` stampa `Server started on port 8080.` **prima** di chiamare `start()`: se la porta è
-  occupata il log mostra comunque un avvio riuscito.
-- `WebServer::start()` blocca su `getc(stdin)`: con stdin a EOF il server si spegne subito. Per
-  pilotarlo da script serve tenere stdin aperta e mandare `\n` per la chiusura pulita — che è anche
-  l'unico modo per far flushare `std::cout` quando è rediretto su file.
-- **`LivePage::createResponse` blocca fino a 10 s prima di rispondere.** `Run()` attende che il
-  thread pubblichi `media_in` per 100 × 100 ms, e solo dopo MHD manda gli header: su una sorgente
-  lenta il browser resta sullo spinner senza sapere nulla. Da quando `Run()` esce subito se il
-  thread ha rinunciato, il caso *fallimento* è veloce — ma il caso *lento* resta bloccante, e la
-  risposta andrebbe restituita subito lasciando che sia la coda a far attendere il client.
-- **`get_buffer` dichiara un errore invece della fine dello stream.** Controlla
-  `media_in == nullptr || cancel_read` **prima** di svuotare la coda, quindi appena la sorgente
-  termina scarta i buffer residui e ritorna `MHD_CONTENT_READER_END_WITH_ERROR`. Il client riceve
-  una risposta abortita e un browser la segnala come "file danneggiato".
-- `media_in` punta a una `FormatContext` **locale** di `streaming_core`: fra il `return` di quella
-  funzione e `media_in = nullptr` in `streaming_thread` il puntatore è dangling, e `get_buffer` lo
-  dereferenzia per leggere `cancel_read`.
+- **Race residuo su `cancel_read`.** `request_cancel()` scrive `FormatContext::cancel_read` mentre
+  l'interrupt callback di FFmpeg lo legge sul thread di streaming: è un `bool` semplice
+  (`avpp.h:165`), quindi formalmente una data race. Non è stato reso `std::atomic<bool>` perché
+  renderebbe `FormatContext` non copiabile **né movibile**, e `format_open_input()` la restituisce
+  per valore: servirebbe darle semantiche di move esplicite, cioè un intervento sostanziale su un
+  tipo condiviso con il progetto `v`.
+- Il file server non manda `Content-Type` per nulla che non sia `.html`: le altre estensioni
+  arrivano senza, e il browser tira a indovinare.

@@ -78,9 +78,7 @@ public:
     void stop_streaming() noexcept
     {
         stop_retrying = true;
-        if (media_in != nullptr) {
-            media_in->cancel_read = true;
-        }
+        request_cancel();
         if (live_thread.joinable()) {
             live_thread.join();
             --live_generators(); // only ever runs once: after the join the thread is no longer joinable
@@ -95,20 +93,16 @@ public:
         stop_streaming();
     }
 
+    // Starts producing and returns immediately.
+    //
+    // It used to wait up to 100 x 100 ms for the source to open before returning, which held the
+    // HTTP handler -- and so the response headers -- for as much as 10 s while the browser sat on a
+    // spinner with nothing to show. Waiting is the consumer's job: get_buffer can tell "not ready
+    // yet" from "never going to be ready", so the response can be committed straight away.
     void Run()
     {
-        int timeout = 100;
         ++live_generators();
         live_thread = std::thread{ &BaseGenerator::streaming_thread, this }; // thread starts immediately
-        // Same missing condition as in get_buffer: once the thread has given up, media_in can never
-        // be set, so there is nothing left to wait for. Without this the handler burned the full
-        // 10 s before returning a response that could only fail.
-        while (this->media_in == nullptr && !streaming_done && --timeout > 0) {
-            std::this_thread::sleep_for(100ms);
-        }
-        if (timeout <= 0) {
-            cout << "Started BaseGenerator" << (timeout <= 0 ? " (BUT WITH TIMEOUT!)." : ".") << "\n";
-        }
     }
 
     void progress_cb(avpp::FormatContext& src)
@@ -119,17 +113,16 @@ public:
         cout << "  " << c << " " << HH_mm_ss_ms(src.current_ms) << " " << c << "\r";
     }
 
-    void streaming_thread() 
+    void streaming_thread()
     {
-        int ret = 0;
         int retries_counter = 0;
         bool normal_exit = false;
 
-        while (retries_counter++ < max_retries) 
+        while (retries_counter++ < max_retries)
         {
             try
             {
-                ret = streaming_core();
+                (void)streaming_core();
                 normal_exit = true;
             }
             catch (avpp::av_error& e)
@@ -145,11 +138,28 @@ public:
                 cout << "UNKNOWN EXCEPTION!" << endl;
             }
 
-            this->media_in = nullptr;
+            // media_in is not cleared here any more: PublishedInput withdraws it inside
+            // streaming_core, before the FormatContext it points at is destroyed. Doing it here left
+            // the pointer dangling for the whole window in between.
 
             if (normal_exit || stop_retrying) {
                 break;
             }
+
+            // A retry can only ever be transparent while the client has seen nothing. Once bytes are
+            // out, restarting would emit a second ftyp/moov in the middle of the stream, which a
+            // player reads as a corrupt file -- so stop instead and let the consumer end cleanly.
+            // This became reachable when Run() stopped waiting for the source: the response is now
+            // committed before the first attempt has had a chance to fail.
+            if (output_handed_over) {
+                cout << "Attempt #" << retries_counter
+                     << " failed after bytes were already sent: not restarting.\n";
+                break;
+            }
+
+            // Nothing has left yet, so whatever the failed attempt queued must go: it would other-
+            // wise sit in front of the next attempt's header.
+            discard_pending_output();
 
             // Say "giving up" on the last attempt instead of "Retrying...", which used to be printed
             // even when no further attempt was coming.
@@ -166,18 +176,64 @@ public:
             this_thread::sleep_for(500ms * retries_counter);
         }
 
-        // Publish that nobody will ever set media_in again. Whoever waits on it -- Run() and
-        // get_buffer -- has to be able to tell "not ready yet" from "never going to be ready".
+        // Order matters: the outcome has to be visible before production is declared over, so that a
+        // consumer which observes streaming_done can trust streaming_failed.
+        streaming_failed = !normal_exit && !stop_retrying;
         streaming_done = true;
     }
 
     virtual int streaming_core() = 0; // Pure virtual: must be implemented in derived class.
 
+    // Drops whatever a failed attempt produced but nobody consumed. Only called while
+    // output_handed_over is false, so nothing observable is ever thrown away.
+    virtual void discard_pending_output() {}
+
 protected:
+    // Publishes the input for the duration of one attempt. Use PublishedInput rather than calling
+    // this directly: the pointer refers to a local of streaming_core and must be withdrawn before
+    // that local dies.
+    void publish_input(avpp::FormatContext* in) noexcept
+    {
+        std::lock_guard<std::mutex> lock{ media_mutex };
+        media_in = in;
+    }
+
+    // Asks the input to stop reading. Under the same lock as publication, so it can never touch a
+    // FormatContext that is already being destroyed.
+    void request_cancel() noexcept
+    {
+        std::lock_guard<std::mutex> lock{ media_mutex };
+        if (media_in != nullptr) {
+            media_in->cancel_read = true;
+        }
+    }
+
+    // RAII publication of the input. Declare it *after* the FormatContext it refers to: reverse
+    // destruction order then withdraws the pointer before the object goes away. Without this,
+    // media_in stayed set from the moment streaming_core returned until streaming_thread cleared it,
+    // and anything reading it in between dereferenced a destroyed object.
+    class PublishedInput {
+    public:
+        PublishedInput(BaseGenerator& owner, avpp::FormatContext& input) : owner(owner)
+        {
+            owner.publish_input(&input);
+        }
+        ~PublishedInput() { owner.publish_input(nullptr); }
+
+        PublishedInput(const PublishedInput&) = delete;
+        PublishedInput& operator=(const PublishedInput&) = delete;
+
+    private:
+        BaseGenerator& owner;
+    };
+
     bool stop_retrying = false;
-    avpp::FormatContext* media_in = nullptr;
-    // Read by the MHD thread and by Run(), written by the streaming thread: has to be atomic.
+    // Written by the streaming thread, read by the MHD thread: both atomic.
     std::atomic<bool> streaming_done{ false };
+    std::atomic<bool> streaming_failed{ false };
+    // Set once the consumer has actually been handed bytes. From that point a retry is no longer
+    // transparent, so it must not happen.
+    std::atomic<bool> output_handed_over{ false };
     std::function<void(avpp::FormatContext& media)> prog_cb = [&](avpp::FormatContext& f) { progress_cb(f); };
 
 public:
@@ -195,6 +251,11 @@ private:
     // Six attempts with a growing backoff spans roughly 8 s of retrying, against ~1.5 s before.
     int max_retries = 6;
     std::thread live_thread;
+
+    // Guards media_in. The pointer is set and withdrawn on the streaming thread and read by whoever
+    // cancels, so the lock is what makes "withdraw before destroying" actually mean something.
+    std::mutex media_mutex;
+    avpp::FormatContext* media_in = nullptr; // guarded by media_mutex
 };
 
 class MP4Generator : public BaseGenerator {
@@ -217,24 +278,14 @@ public:
     // building at /W3, and the caller's "> 0" test reads like a guard while never firing for them.
     ssize_t get_buffer(char* buf, size_t max)
     {
-        // Not an impossible state, despite what this used to claim: MHD asks for data as soon as the
-        // response is queued, and the source can still be opening. What matters is giving up when
-        // the streaming thread is done, because then media_in will never be set. Without that exit
-        // this loop spun forever -- measured at 26520 iterations over 427 s, with the client
-        // receiving neither a byte nor an error, which is what left the browser on a spinner.
-        while (media_in == nullptr && !streaming_done) {
+        // An empty queue is not an end: MHD asks for data as soon as the response is committed, the
+        // source can take seconds to open, and a failed attempt is retried. The only real end is
+        // "production is over", and even then only once what it left behind has been handed over.
+        //
+        // This no longer consults media_in at all, which is what removes the last read of a pointer
+        // that could refer to a destroyed FormatContext.
+        while (stream_queue.size() == 0 && !streaming_done) {
             std::this_thread::sleep_for(10ms);
-        }
-        if (media_in == nullptr) {
-            return static_cast<ssize_t>(MHD_CONTENT_READER_END_WITH_ERROR);
-        }
-
-        while (stream_queue.size() <= 0 && (media_in != nullptr && !media_in->cancel_read)) {
-            std::this_thread::sleep_for(10ms);
-        }
-
-        if (media_in == nullptr || media_in->cancel_read) {
-            return static_cast<ssize_t>(MHD_CONTENT_READER_END_WITH_ERROR);
         }
 
         auto opt = stream_queue.pop();
@@ -245,11 +296,16 @@ public:
             memcpy(buf, vec->data(), size); // ottimizzare con un move?
             delete vec, vec = nullptr;
 
+            output_handed_over = true; // from here on a retry would corrupt what the client has
             return static_cast<ssize_t>(size);
         }
 
-        cout << "+++++++++++++++++++++++++++++++++ return END_OF_STREAM\n";
-        return static_cast<ssize_t>(MHD_CONTENT_READER_END_OF_STREAM);
+        // The queue is drained and production is over. Which of MHD's two endings applies depends on
+        // how production ended, and nothing is discarded to get here: the old code tested media_in
+        // *before* draining, so a stream that ended normally threw away everything still queued and
+        // reported an error -- which a browser renders as a corrupt file.
+        return static_cast<ssize_t>(streaming_failed ? MHD_CONTENT_READER_END_WITH_ERROR
+                                                     : MHD_CONTENT_READER_END_OF_STREAM);
     }
 
     int write_cb(const uint8_t* buf, int size)
@@ -258,6 +314,15 @@ public:
         memcpy(v->data(), buf, size);
         stream_queue.push(v);
         return size;
+    }
+
+    // Called between a failed attempt and the next one, never once bytes have gone out.
+    void discard_pending_output() override
+    {
+        while (auto opt = stream_queue.pop()) {
+            auto vec = *opt;
+            delete vec;
+        }
     }
 
     virtual int streaming_core() override
@@ -298,7 +363,8 @@ public:
             { "asetnsamples", "1024" },
             { "asettb", avpp::FLICKS_TIMESCALE_STR }
         });
-        this->media_in = &input;
+        // Declared after `input` on purpose: it is withdrawn before `input` is destroyed.
+        PublishedInput published{ *this, input };
 
         auto output = avpp::format_open_output_to_buffer(wr_cb, BUFSIZE, "mp4", input, { { "movflags", "frag_keyframe+empty_moov" } });
         output.new_stream(AVMEDIA_TYPE_VIDEO);
@@ -494,8 +560,16 @@ int main(int argc, char** argv)
     WebServer server(8080);
     server.addController(&live);
     server.addController(&files);
+
+    // Announce the port only once it is actually bound. This used to print before start(), so an
+    // occupied port produced a log that claimed a successful start and a process that served nothing.
+    if (server.listen() != 0) {
+        cout << "ERROR: cannot listen on port " << server.get_port() << " (already in use?).\n";
+        return 1;
+    }
+
     cout << "Server started on port " << server.get_port() << ".\n";
-    server.start();
+    server.wait_and_stop();
     cout << "Server stopped.\n";
 
     return 0;
