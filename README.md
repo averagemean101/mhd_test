@@ -82,12 +82,16 @@ Poi <http://127.0.0.1:8080/>, che serve la pagina con il link per avviare lo str
 | rotta | risposta |
 |---|---|
 | `GET /` | `www/index.html`: lista canali a sinistra, televisore a destra |
-| `GET /live/{rai1,rai2,tv8}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
+| `GET /live/{rai1,rai2,italia1,tv8,20}` | MP4 frammentato in streaming, `Content-Type: video/mp4` |
 | `GET /live/<altro>` | `404` |
 | `GET /<path>` | file server, oppure l'elenco della cartella se `<path>` è una directory senza `index.html` |
 | fuori dal root | `403` |
 
 I canali stanno nella tabella `CHANNELS` di [mhd_test.cpp](mhd_test/mhd_test.cpp): aggiungerne uno è una riga lì più un `<button>` in `www/index.html`. `LivePage` risolve lo slug e passa la URL già risolta al generator, che quindi non ripete la ricerca.
+
+Lo slug è confrontato **per intero** con il pezzo di path dopo `/live/`. Prima era una ricerca di
+sottostringa, che con lo slug `20` avrebbe risposto per qualunque path contenente quelle due cifre:
+`/live/canale20` restituisce `404`, come deve.
 
 Il root del file server è la cartella **`www/` accanto all'eseguibile**, non la working directory:
 il programma si lancia tipicamente come `.\build\Release\mhd_test.exe` dalla radice del repo, e un
@@ -96,14 +100,80 @@ accanto all'exe a ogni build, quindi **dopo aver editato la pagina serve un rebu
 
 ## Stato delle sorgenti (29/07/2026)
 
-Tre canali, tutti verificati end-to-end attraverso l'applicazione (25 MB, 24 MB e 8 MB di stream
-consegnati in ~20 s ciascuno):
+Cinque canali, tutti verificati end-to-end attraverso l'applicazione: ognuno consegna stream
+decodificabile (18/18/1,8/7,8/2,5 MB in 12 s), e le due rotte di controllo `/live/rete4` e
+`/live/canale20` rispondono `404`.
 
 | canale | sorgente | note |
 |---|---|---|
-| `tv8` | `mytivu.it/Application/Channels/TV8.php` | la `.php` conia un token Akamai nuovo a ogni chiamata: va invocata quella, **non** la URL che restituisce |
 | `rai1` | relinker Rai, `cont=2606803` | vedi sotto |
 | `rai2` | relinker Rai, `cont=308718` | vedi sotto |
+| `italia1` | `live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8` | vedi «Mediaset» e il difetto sui 50 fps |
+| `tv8` | `mytivu.it/Application/Channels/TV8.php` | la `.php` conia un token Akamai nuovo a ogni chiamata: va invocata quella, **non** la URL che restituisce |
+| `20` | `.../live/ch-lb/lb-clr.isml/index.m3u8` | idem; il codice canale di «20» è `lb` |
+
+### Mediaset: l'host giusto, e come è stato trovato
+
+Le playlist Mediaset del 2021 puntavano a `liveN-mediaset-it.akamaized.net`, che **non esiste più**:
+`NXDOMAIN` sia dal resolver locale sia da `8.8.8.8` e `1.1.1.1`, quindi non è un effetto della VPN.
+Anche `liveN.msf.cdn.mediaset.net`, che compare nelle liste IPTV community, è `NXDOMAIN`.
+
+L'host vivo è `live02-seg.msf.cdn.mediaset.net` (esiste anche `live03-seg`, non `live01-seg`), con lo
+schema Unified Streaming `/live/ch-<id>/<id>-clr.isml/index.m3u8`. Il suffisso `-clr` è la resa in
+chiaro: le playlist non contengono `#EXT-X-KEY`, quindi non c'è niente da decifrare. Nessun `.mpd`
+è raggiungibile su quell'host: le tre forme provate rispondono `451`.
+
+### I timestamp rotti di quei TS, e i due frame su tre che costavano
+
+Questi canali sono 1024x576**@50p**, ma alla prima misura uscivano a **16,6 fps**: 60 ms esatti tra
+un frame e l'altro in 521 intervalli su 571, e nessun B-frame nell'output (`B=0 I=27 P=544`) contro
+`B=375 I=9 P=192` della sorgente. Spariva esattamente un tipo di immagine, cioè 2 frame su 3.
+
+La causa è nella sorgente: i segmenti TS Mediaset danno a ogni B-frame `dts = pts + 1800` a 90 kHz,
+cioè un DTS **successivo** al PTS. È invalido — nessun frame può essere mostrato prima di essere
+decodificato — e `mpegts` lo segnala (16 741 righe `Invalid timestamps` in una sessione, **tutte**
+con delta 1800). Il muxer `mp4` poi rifiuta il pacchetto con `EINVAL`, e `avpp::send_pkt()`
+scartava il valore di ritorno: il frame se ne andava in silenzio.
+
+La riparazione, in [avpp.cpp](../common/avpp.cpp), è quella che applica la catena di muxing di
+ffmpeg stessa, e sono **due** passi — il primo da solo non basta:
+
+1. se `dts > pts`, schiaccia `dts = pts`;
+2. se il `dts` così ottenuto non è **strettamente** maggiore dell'ultimo scritto, spingilo avanti di
+   un tick. Serve perché in questi stream il pts di un B-frame coincide col dts del pacchetto
+   precedente, quindi il passo 1 produce un duplicato e `mp4` lo rifiuta a sua volta
+   (`non monotonically increasing dts ... 14112235 >= 14112235`). Alla scala dei flicks un tick è
+   1,4 ns, quindi l'istante di visualizzazione non si muove.
+
+Applicando solo il passo 1 si passava da 16,6 a 31,5 fps — metà dei B-frame recuperati. Con
+entrambi: **49,98 fps su un taglio pulito, con zero errori di decodifica**, e `r_frame_rate` letto
+correttamente come `50/1`. Contatori a valle della correzione: `letti=1448, entrati=1448,
+scritti=1448, falliti=0`. `tv8` e `rai1`, che sono a 25 fps, restano identici.
+
+Il percorso è stato trovato strumentando temporaneamente il loop di `avpp` con un contatore per
+stream; la strumentazione è stata rimossa, ma `send_pkt()` ora **dichiara** una scrittura fallita
+(`MUXER: write failed on stream N, frame lost`, prime 8 per contesto). Prima l'unica traccia era il
+messaggio di FFmpeg, che non nomina lo stream e si perde in un log che il demuxer sta già riempiendo.
+
+### Le varianti non usate non si scaricano più
+
+Lo stesso contatore ha fatto emergere un secondo difetto, indipendente: su `italia1` arrivavano 1448
+pacchetti video utili e **7235 da stream che poi buttavamo**; su `rai1` 1011 contro 16256. Sono le
+altre varianti di bitrate del master HLS. `av_find_best_stream()` ne sceglie una, ma
+`open_best_streams()` non metteva `AVDISCARD_ALL` sulle altre, e il demuxer `hls` tiene viva una
+playlist finché **uno qualsiasi** dei suoi stream sta sotto `AVDISCARD_ALL`: le scaricava tutte.
+
+Non era solo banda buttata. Su questa rete dietro proxy lo stream non stava al passo col tempo reale:
+
+| `italia1`, cattura da 45 s | contenuto consegnato | wall clock | rapporto |
+|---|---|---|---|
+| prima | 26,9 s | 45,0 s | **0,60** |
+| dopo | 57,6 s | 49,0 s | **1,18** |
+
+Con `discard_unselected_streams()` il server ora annuncia cosa ha scartato — `19 unselected stream(s)
+discarded, 2 kept` sui canali Rai, 5 sui Mediaset, 7 su `tv8` — e tutti e cinque i canali stanno
+sopra 1,0, cioè avanti al tempo reale. Il frame rate resta quello giusto (48,3 fps misurati sui
+Mediaset, con la coda troncata dal taglio a spiegare il resto).
 
 ### Il relinker Rai non richiede parsing
 
@@ -132,7 +202,7 @@ cioè **VOD**, non il canale live.
 
 | ex canale | perché |
 |---|---|
-| `italia1`, `focus` | **morti**: playlist Mediaset salvate nel 2021, il cui CDN non risolve più in DNS |
+| `focus` | playlist Mediaset salvata nel 2021, il cui CDN non risolve più in DNS. `italia1` era nella stessa condizione ed è stato **recuperato** sul nuovo host: vedi sopra |
 | `Cielo` (mytivu) | l'endpoint esiste ma risponde `302` senza `Location` utile |
 
 Con le prime due sono spariti `DASHGenerator` e `HLSGenerator`, che erano già disattivati,
@@ -226,7 +296,11 @@ legge come file corrotto: `output_handed_over` blocca il retry, e finché è fal
   l'interrupt callback di FFmpeg lo legge sul thread di streaming: è un `bool` semplice
   (`avpp.h:165`), quindi formalmente una data race. Non è stato reso `std::atomic<bool>` perché
   renderebbe `FormatContext` non copiabile **né movibile**, e `format_open_input()` la restituisce
-  per valore: servirebbe darle semantiche di move esplicite, cioè un intervento sostanziale su un
-  tipo condiviso con il progetto `v`.
+  per valore: servirebbe darle semantiche di move esplicite.
+
+  *Rettifica (29/07/2026):* una versione precedente di questa voce motivava la scelta anche con
+  «un tipo condiviso con il progetto `v`». È falso e verificato tale: `v` non contiene nessun
+  riferimento ad `avpp`, include da `common` solo `utils.h`. La ragione tecnica resta, quella sul
+  progetto `v` no.
 - Il file server non manda `Content-Type` per nulla che non sia `.html`: le altre estensioni
   arrivano senza, e il browser tira a indovinare.

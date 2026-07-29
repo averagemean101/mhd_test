@@ -8,30 +8,50 @@ constexpr auto BUFSIZE = 4096;
 constexpr auto BROWSER_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                             "(KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-// Sources that are actually reachable. The Mediaset playlists that used to be here were saved in
-// 2021 and their CDN no longer resolves in DNS, so they are gone rather than listed as broken.
+// Sources that are actually reachable, listed in Italian channel-number order. Two families of
+// them need a note:
 //
-// The Rai entries use output=7 with forceUserAgent, which makes the relinker answer a plain 302 to
-// the HLS playlist. FFmpeg follows redirects, so this needs no XML handling -- output=64 instead
-// returns a <Mediapolis> document with the URL buried in CDATA, which would have to be parsed.
+// - The Rai entries use output=7 with forceUserAgent, which makes the relinker answer a plain 302 to
+//   the HLS playlist. FFmpeg follows redirects, so this needs no XML handling -- output=64 instead
+//   returns a <Mediapolis> document with the URL buried in CDATA, which would have to be parsed.
+// - The Mediaset entries are served from live02-seg.msf.cdn.mediaset.net, not from the
+//   liveN-mediaset-it.akamaized.net hosts of the playlists saved here in 2021: those names have no
+//   DNS record any more, which two public resolvers confirm independently of the local one. The
+//   "-clr" rendition is the one to ask for; its media playlists carry no #EXT-X-KEY, so nothing in
+//   the path has to be decrypted.
 struct Channel {
-    const char* slug; // matched against /live/<...>, lowercased
+    const char* slug; // the path component after /live/, lowercased
     const char* url;
 };
 
 constexpr Channel CHANNELS[] = {
-    { "tv8",  "https://www.mytivu.it/Application/Channels/TV8.php" },
-    { "rai1", "https://mediapolis.rai.it/relinker/relinkerServlet.htm"
-              "?cont=2606803&output=7&forceUserAgent=raiplayappletv" },
-    { "rai2", "https://mediapolis.rai.it/relinker/relinkerServlet.htm"
-              "?cont=308718&output=7&forceUserAgent=raiplayappletv" },
+    { "rai1",    "https://mediapolis.rai.it/relinker/relinkerServlet.htm"
+                 "?cont=2606803&output=7&forceUserAgent=raiplayappletv" },
+    { "rai2",    "https://mediapolis.rai.it/relinker/relinkerServlet.htm"
+                 "?cont=308718&output=7&forceUserAgent=raiplayappletv" },
+    { "italia1", "https://live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8" },
+    { "tv8",     "https://www.mytivu.it/Application/Channels/TV8.php" },
+    { "20",      "https://live02-seg.msf.cdn.mediaset.net/live/ch-lb/lb-clr.isml/index.m3u8" },
 };
 
-// Returns the channel whose slug appears in the request path, or nullptr.
+// Returns the channel addressed by the request path, or nullptr.
+//
+// The name is compared whole rather than searched for: a substring match would let the two-digit
+// slug "20" answer for any path that merely contains those digits.
 static const Channel* find_channel(const std::string& lowered_path)
 {
+    const std::string prefix = "/live/";
+    if (lowered_path.rfind(prefix, 0) != 0) {
+        return nullptr;
+    }
+
+    std::string name = lowered_path.substr(prefix.size());
+    while (!name.empty() && name.back() == '/') { // tolerate "/live/tv8/"
+        name.pop_back();
+    }
+
     for (const auto& channel : CHANNELS) {
-        if (lowered_path.find(channel.slug) != std::string::npos) {
+        if (name == channel.slug) {
             return &channel;
         }
     }
