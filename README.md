@@ -384,6 +384,70 @@ il primo byte consegnato, riavviare emetterebbe un secondo `ftyp/moov` a metà s
 legge come file corrotto: `output_handed_over` blocca il retry, e finché è falso
 `discard_pending_output()` butta ciò che il tentativo fallito aveva accodato.
 
+## La catena audio
+
+Il video è in **copy**, l'audio no: viene decodificato, filtrato e ri-codificato in AAC a 96 kbps.
+È una scelta, non un residuo — è ciò che permette di applicare filtri, a partire dalla
+normalizzazione del volume — e ha una conseguenza architetturale da tenere presente: **esclude il
+proxy puro**, perché se manipoli l'audio i byte non possono passare intatti.
+
+```
+loudnorm=I=-16
+aformat=sample_fmts=fltp:sample_rates=<rate della sorgente>:channel_layouts=stereo
+asetnsamples=1024
+asettb=1/705600000
+```
+
+### Normalizzazione: quale filtro, e perché quello
+
+I canali arrivavano con volumi molto diversi. Misurato con `ebur128` sull'uscita, prima:
+
+| canale | prima | dopo |
+|---|---|---|
+| `rai1` `rai2` `rai3` | −21,7 · −22,1 · −22,9 LUFS | −16,3 LUFS |
+| `italia1` `20` `focus` | −23,2 · −23,1 · −23,7 LUFS | −15,7 · −16,2 LUFS |
+| `tv8` | **−32,4 LUFS** | −15,7 LUFS |
+
+Spread fra i canali: da **10,7 LU a 0,6 LU**. Rai e Mediaset erano già vicini al −23 LUFS di EBU
+R128, come ci si aspetta da emittenti conformi; l'anomalo era `tv8`, circa 10 dB sotto tutti.
+
+Il target è **−16 LUFS** e non il −23 da broadcast perché la destinazione è una pagina del browser
+che compete con tutto il resto dell'audio della macchina, non un televisore.
+
+I tre candidati sono stati **misurati**, alimentandoli in tempo reale e contando quanti secondi di
+audio emettevano in 12 s di wall clock:
+
+| filtro | ritardo aggiunto | uscita | esito |
+|---|---|---|---|
+| `loudnorm` | **~2,7 s** | forza la catena a **192 kHz** | scelto |
+| `dynaudnorm` | **≥10,9 s** (non ha emesso nulla in 12 s) | 48 kHz | inutilizzabile in diretta |
+| `speechnorm` | **0 s**, causale | 48 kHz | alternativa se la latenza conta più del livellamento |
+
+Il prezzo di `loudnorm` è dichiarato: in modalità a passata singola guarda avanti prima di emettere,
+e quei ~2,7 s **ritardano l'intero stream, video compreso**, perché l'header del muxer non esce
+finché tutti gli stream non hanno prodotto qualcosa. In-app il primo byte di corpo arriva dopo
+1,6-2,7 s, ma la varianza fra canali è dello stesso ordine del ritardo cercato e il campione è di uno
+per canale: **il numero affidabile è quello isolato**, non questo.
+
+### I parametri che c'erano, e cosa ne è rimasto
+
+- **`aresample=44100` — rimosso.** Le sorgenti non hanno tutte lo stesso rate: Rai consegna 44,1 kHz,
+  Mediaset 48 kHz. Quel filtro era quindi **inerte** su una famiglia e un **downsample gratuito**
+  sull'altra. L'encoder prende sample rate, formato e layout dal frame filtrato
+  ([avpp.cpp](../common/avpp.cpp), `init_encoder`), quindi togliere il vincolo fa semplicemente
+  arrivare ogni canale al suo rate nativo. Il rate compare ancora dentro `aformat`, ma è quello
+  **della sorgente**, e serve solo a rientrare dai 192 kHz che `loudnorm` impone.
+- **`aformat` — tenuto ed esteso.** `fltp` è l'unico formato che l'encoder AAC accetta, e senza il
+  vincolo la catena gli consegnerebbe il `dbl` in cui lavora `loudnorm`. Ci sono ora anche
+  `sample_rates` e `channel_layouts=stereo`: un solo filtro di vincolo al posto di un resampler più
+  un formato, con il graph che inserisce da sé le conversioni. Il downmix oggi **non converte
+  niente** — tutte le sorgenti sono già stereo, verificato — ma copre il caso di una che passi a 5.1.
+- **`asetnsamples=1024` — tenuto, ed è portante.** AAC vuole esattamente 1024 campioni per frame e
+  `avpp` **non** chiama `av_buffersink_set_frame_size()`: senza questo filtro il framing non lo fa
+  nessuno. Sta dopo `aformat` perché i 1024 campioni devono essere del rate finale.
+- **`asettb` — tenuto.** Qualunque ricampionamento nella catena lascia il timebase d'uscita a
+  `1/sample_rate`; questo lo riporta ai flicks della libreria.
+
 ## Quando la sorgente muore a metà: il fallimento che si traveste da successo
 
 Sintomo osservato il 29/07/2026 su `focus`, **fuori dalla VPN**: ogni tanto l'immagine si ferma e non

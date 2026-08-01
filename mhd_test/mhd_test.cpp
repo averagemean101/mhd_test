@@ -472,12 +472,42 @@ public:
         });
         input.dump_format();
         input.open_best_streams();
-        input.add_filter_graph(input.id_audio, { 
-            { "aresample", "44100" },
-            { "aformat", "fltp" },
-            { "asetnsamples", "1024" },
-            { "asettb", avpp::FLICKS_TIMESCALE_STR }
-        });
+        if (input.id_audio >= 0) {
+            // The source's own rate, named because loudnorm below drags the whole chain to 192 kHz
+            // -- measured: the graph auto-inserts a resampler into it and its output stays there --
+            // which is not even a valid AAC sample rate, so the way out has to say where to come
+            // back to. Saying "the source's own" is what keeps this lossless: the sources differ,
+            // Rai delivering 44,1 kHz and Mediaset 48 kHz, and the chain used to resample everything
+            // to 44100 -- inert on one family, a pointless downsample on the other.
+            const int audio_rate = input->streams[input.id_audio]->codecpar->sample_rate;
+
+            input.add_filter_graph(input.id_audio, {
+                // EBU R128 loudness normalisation, so the volume knob does not have to be touched
+                // when changing channel. -16 LUFS rather than the broadcast -23: this ends up in a
+                // browser page competing with everything else the machine is playing, not on a TV.
+                //
+                // It costs latency, and the figure was measured rather than assumed: ~2,7 s of added
+                // pipeline lag, because in single-pass mode the filter looks ahead before emitting.
+                // If that ever matters more than the levelling, `speechnorm` is the causal
+                // alternative, measured at zero added lag. `dynaudnorm` is not an alternative here
+                // at all: it emitted nothing whatsoever in 12 s of real-time input.
+                { "loudnorm", "I=-16" },
+                // One constraint filter rather than a resampler plus a format: the graph inserts
+                // whatever conversion satisfies it. fltp because it is the only sample format the
+                // AAC encoder accepts, stereo because a 5.1 source would otherwise reach the encoder
+                // as 5.1 -- every source is stereo today, so that part is insurance, not a
+                // conversion.
+                { "aformat", avpp::FilterArgs(
+                    "sample_fmts=fltp:sample_rates=%d:channel_layouts=stereo", audio_rate) },
+                // AAC wants exactly 1024 samples per frame, and avpp does not call
+                // av_buffersink_set_frame_size(), so the framing has to be asked for explicitly.
+                // After the rate is settled, so the frames are 1024 samples of the final rate.
+                { "asetnsamples", "1024" },
+                // Back to the library's timescale: resampling leaves the output timebase at
+                // 1/sample_rate, whoever inserted it.
+                { "asettb", avpp::FLICKS_TIMESCALE_STR }
+            });
+        }
         // Declared after `input` on purpose: it is withdrawn before `input` is destroyed.
         PublishedInput published{ *this, input };
 
