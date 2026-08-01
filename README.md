@@ -104,30 +104,40 @@ il programma si lancia tipicamente come `.\build\Release\mhd_test.exe` dalla rad
 path relativo alla CWD cercherebbe nel posto sbagliato. `www/` è versionata qui e CMake la copia
 accanto all'exe a ogni build, quindi **dopo aver editato la pagina serve un rebuild**.
 
-## Stato delle sorgenti (29/07/2026)
+## Stato delle sorgenti (01/08/2026)
 
 Sette canali, tutti verificati end-to-end attraverso l'applicazione: ognuno consegna stream
 decodificabile, e le due rotte di controllo `/live/rete4` e `/live/canale20` rispondono `404`.
 
-| canale | sorgente | note |
-|---|---|---|
-| `rai1` | relinker Rai, `cont=2606803` | vedi sotto |
-| `rai2` | relinker Rai, `cont=308718` | vedi sotto |
-| `rai3` | relinker Rai, `cont=308709` | 1920x1080, 24,5 fps consegnati, 50 s di contenuto in 28,8 s |
-| `italia1` | `live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8` | vedi «Mediaset» e il difetto sui 50 fps |
-| `tv8` | `mytivu.it/Application/Channels/TV8.php` | la `.php` conia un token Akamai nuovo a ogni chiamata: va invocata quella, **non** la URL che restituisce |
-| `20` | `.../live/ch-lb/lb-clr.isml/index.m3u8` | idem; il codice canale di «20» è `lb` |
-| `focus` | `.../live/ch-fu/fu-clr.isml/index.m3u8` | idem; codice `fu`. 1024x576 a 25 fps, non 50p come gli altri due Mediaset |
+Misure prese **fuori dalla VPN aziendale**, a differenza dei rapporti contenuto/wall clock delle
+sezioni sui difetti più sotto, che sono tutti dietro proxy: non sono confrontabili. Catture da 20 s,
+zero errori di decodifica e zero `MUXER: write failed` su tutti e sette.
 
-`focus` è stato aggiunto e misurato **fuori dalla VPN aziendale**, a differenza dei rapporti
-contenuto/wall clock riportati più sotto, che sono tutti dietro proxy: 28,8 s di contenuto consegnati
-in 25,0 s di cattura (**1,15**), `r_frame_rate` `25/1` con 25,01 fps medi, zero errori di decodifica,
-nessun `MUXER: write failed`, e `4 unselected stream(s) discarded, 2 kept`.
+| canale | sorgente | consegnato | contenuto / wall clock |
+|---|---|---|---|
+| `rai1` | relinker Rai, `cont=2606803` | 1920x1080 @5689 kbps | 1,95 |
+| `rai2` | relinker Rai, `cont=308718` | 1920x1080 @5689 kbps | 1,95 |
+| `rai3` | relinker Rai, `cont=308709` | 1920x1080 @5689 kbps | 1,96 |
+| `italia1` | `live02-seg.msf.cdn.mediaset.net/live/ch-i1/i1-clr.isml/index.m3u8` | 1920x1080**@50p**, 8269 kbps | 1,25 |
+| `tv8` | `mytivu.it/Application/Channels/TV8.php` | 854x480 @3196 kbps, tetto della sua ladder | 1,99 |
+| `20` | `.../live/ch-lb/lb-clr.isml/index.m3u8` | 1920x1080**@50p**, 8269 kbps | 1,05 |
+| `focus` | `.../live/ch-fu/fu-clr.isml/index.m3u8` | 1920x1080, 8269 kbps | 1,05 |
 
-Porta lo stesso difetto di timestamp degli altri Mediaset, scalato al suo frame rate: `dts = pts +
-3600` a 90 kHz, cioè 40 ms, un intervallo di frame a 25 fps (sui 50p il delta è 1800). È stata anche
-la prima prova sul campo del filtro del log: oltre mille occorrenze ridotte a sette righe, e nove in
-tutto sullo stderr della sessione.
+Note sulle sorgenti: la `.php` di `tv8` conia un token Akamai nuovo a ogni chiamata, quindi va
+invocata quella e **non** la URL che restituisce; i codici canale Mediaset sono `i1`, `lb` e `fu`
+(vedi «Trovare il codice»); i tre Rai passano dal relinker con `output=7`.
+
+**Le risoluzioni sono quelle del 01/08/2026**, quando `open_best_streams()` ha smesso di prendere la
+prima variante del master playlist per prendere la più grande — prima `focus` e `italia1` uscivano a
+1024x576. Il dettaglio è in [common/README.md](../common/README.md), §2; qui conta la conseguenza
+misurata: il margine sul tempo reale **si è assottigliato** dove il rung è cresciuto di più, da 1,15
+a 1,05 su `focus`. Resta sopra 1,0, ma è il numero da guardare per primo quando si proverà il
+multi-client.
+
+`focus` porta lo stesso difetto di timestamp degli altri Mediaset, scalato al suo frame rate:
+`dts = pts + 3600` a 90 kHz, cioè 40 ms, un intervallo di frame a 25 fps (sui 50p il delta è 1800).
+È stata anche la prima prova sul campo del filtro del log: oltre mille occorrenze ridotte a sette
+righe, e nove in tutto sullo stderr della sessione.
 
 ### Mediaset: l'host giusto, e come è stato trovato
 
@@ -170,7 +180,8 @@ mappatura ufficiale, risponde `403` sia nuda sia con User-Agent, `Referer` e `Or
 
 ### I timestamp rotti di quei TS, e i due frame su tre che costavano
 
-Questi canali sono 1024x576**@50p**, ma alla prima misura uscivano a **16,6 fps**: 60 ms esatti tra
+Questi canali uscivano allora a 1024x576**@50p** — la variante che si prendeva prima della selezione
+per risoluzione, non un limite della sorgente — ma alla prima misura arrivavano a **16,6 fps**: 60 ms esatti tra
 un frame e l'altro in 521 intervalli su 571, e nessun B-frame nell'output (`B=0 I=27 P=544`) contro
 `B=375 I=9 P=192` della sorgente. Spariva esattamente un tipo di immagine, cioè 2 frame su 3.
 
